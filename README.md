@@ -161,6 +161,7 @@ $$
 Because you typically pick a notional for one leg (here the 5Y, $n_5$), these two equations become a $2 \times 2$ linear system in the unknowns $n_2$ and $n_{10}$.
 
 Rewriting those two neutrality conditions in matrix form:
+
 $$
 \begin{pmatrix}
 BPV_2 \cdot e_{2,1} & BPV_{10} \cdot e_{10,1} \\
@@ -178,6 +179,7 @@ e_{5,2}
 $$
 
 Symbolically:
+
 $$
 A \cdot 
 \begin{pmatrix}
@@ -201,6 +203,7 @@ e_{5,2}
 $$
 
 Provided $A$ is invertible (which it usually is, assuming non-degenerate factor loadings and DV01s), the solution is simply:
+
 $$
 \begin{pmatrix}
 n_2 \\
