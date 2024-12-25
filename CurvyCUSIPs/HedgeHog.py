@@ -32,6 +32,7 @@ def dv01_neutral_curve_hegde_ratio(
     yvx_beta_adjustment: Optional[int] = None,
     verbose: Optional[bool] = True,
     very_verbose: Optional[bool] = False,
+    custom_beta_weighted_title: Optional[str] = None,
 ):
     if isinstance(front_leg_bond_row, pd.Series) or isinstance(front_leg_bond_row, pd.DataFrame):
         front_leg_bond_row = front_leg_bond_row.to_dict("records")[0]
@@ -77,9 +78,10 @@ def dv01_neutral_curve_hegde_ratio(
     print(f"{front_leg_bond_row["ust_label"]} / {back_leg_bond_row["ust_label"]}") if verbose else None
 
     hr = back_leg_metrics["bps"] / front_leg_metrics["bps"]
-    print(colored(f"BPV Neutral Hedge Ratio: {hr}", "light_blue")) if verbose else None
+    print(colored(f"BPV Neutral Hedge Ratio: {hr}", "light_blue")) if verbose and not yvx_beta_adjustment else None
     if yvx_beta_adjustment:
-        (print(colored(f"Beta Weighted Hedge Ratio: {hr * yvx_beta_adjustment:3f}", "light_magenta")) if verbose else None)
+        title = custom_beta_weighted_title or "Beta Weighted Hedge Ratio" 
+        (print(colored(f"{title}: {hr * yvx_beta_adjustment:3f}", "light_magenta")) if verbose else None)
         hr = hr * yvx_beta_adjustment
 
     if total_trade_par_amount is not None:
@@ -107,11 +109,11 @@ def dv01_neutral_curve_hegde_ratio(
             f"Front Leg: {front_leg_bond_row["ust_label"]} (OST {front_leg_bond_row["original_security_term"]}, TTM = {front_leg_bond_row["time_to_maturity"]:3f}) Par Amount = {front_leg_par_amount :_}"
         )
         print(
-            f"Back Leg: {back_leg_bond_row["ust_label"]} (OST {back_leg_bond_row["original_security_term"]}, TTM = {back_leg_bond_row["time_to_maturity"]:3f}) Par Amount = {back_leg_par_amount:_}"
+            f"Back Leg: {back_leg_bond_row["ust_label"]} (OST {back_leg_bond_row["original_security_term"]}, TTM = {back_leg_bond_row["time_to_maturity"]:3f}) Par Amount = {round(back_leg_par_amount):_}"
         )
         print(f"Total Trade Par Amount: {front_leg_par_amount + back_leg_par_amount:_}")
-        risk_weight = (front_leg_par_amount * front_leg_metrics["bps"] / 100) / (back_leg_par_amount * back_leg_metrics["bps"] / 100)
-        print(f"Risk Weights: {risk_weight:3f} : 100")
+        # risk_weight = (front_leg_par_amount * front_leg_metrics["bps"] / 100) / (back_leg_par_amount * back_leg_metrics["bps"] / 100)
+        # print(f"Risk Weights: {risk_weight:3f} : 100")
 
     return {
         "current_spread": (back_leg_bond_row[f"{quote_type}_yield"] - front_leg_bond_row[f"{quote_type}_yield"]) * 100,

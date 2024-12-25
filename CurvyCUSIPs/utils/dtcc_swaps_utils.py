@@ -409,7 +409,7 @@ def build_ql_piecewise_curves(
 def scipy_linear_interp_func(xx, yy, kind="linear", logspace=False):
     if logspace:
         log_y = np.log(yy)
-        interp_func = scipy.interpolate.interp1d(xx, log_y, kind="linear", fill_value="extrapolate", bounds_error=False)
+        interp_func = scipy.interpolate.interp1d(xx, log_y, kind=kind, fill_value="extrapolate", bounds_error=False)
 
         def log_linear_interp(x_new):
             return np.exp(interp_func(x_new))
@@ -422,39 +422,41 @@ def scipy_linear_interp_func(xx, yy, kind="linear", logspace=False):
 
 
 def calculate_tenor_combined(effective_date, expiration_date):
-    delta = relativedelta(expiration_date, effective_date)
-    tenor_parts = []
+    try:
+        delta = relativedelta(expiration_date, effective_date)
+        tenor_parts = []
 
-    if delta.years == 0:
+        if delta.years == 0:
+            if delta.months > 0:
+                if delta.days > 5:
+                    days = delta.months * 30 + delta.days
+                    if days % 30 <= 5 or days % 30 >= 25:
+                        return f"{round(days / 30)}M"
+                    return f"{days}D"
+                return f"{delta.months}M"
+
+            if delta.days == 0:
+                return "1D"
+            days = delta.months * 30 + delta.days
+            if days % 30 <= 5 or days % 30 >= 25 or days >= 25:
+                return f"{round(days / 30)}M"
+            return f"{delta.days}D"
+
+        has_months = False
+        if delta.years > 0:
+            tenor_parts.append(f"{delta.years}Y")
         if delta.months > 0:
-            if delta.days > 5:
-                days = delta.months * 30 + delta.days
-                if days % 30 <= 5 or days % 30 >= 25:
-                    return f"{round(days / 30)}M"
-                return f"{days}D"
-            return f"{delta.months}M"
+            tenor_parts.append(f"{delta.months}M")
+            has_months = True
+        if delta.days > 10 and has_months:
+            days = (delta.years * 365) + (delta.months * 30) + delta.days
+            if days % 30 < 5 or days % 30 > 25:
+                return f"{round(days / 30)}M"
+            return f"{days}D"
 
-        if delta.days == 0:
-            return "1D"
-        days = delta.months * 30 + delta.days
-        if days % 30 <= 5 or days % 30 >= 25 or days >= 25:
-            return f"{round(days / 30)}M"
-        return f"{delta.days}D"
+        if len(tenor_parts) == 1 and delta.years == 1:
+            return "12M"
 
-    has_months = False
-    if delta.years > 0:
-        tenor_parts.append(f"{delta.years}Y")
-    if delta.months > 0:
-        tenor_parts.append(f"{delta.months}M")
-        has_months = True
-    if delta.days > 10 and has_months:
-        days = (delta.years * 365) + (delta.months * 30) + delta.days
-        if days % 30 < 5 or days % 30 > 25:
-            return f"{round(days / 30)}M"
-        return f"{days}D"
-
-    if len(tenor_parts) == 1 and delta.years == 1:
-        return "12M"
-
-    return "".join(tenor_parts)
-
+        return "".join(tenor_parts)
+    except:
+        return np.nan

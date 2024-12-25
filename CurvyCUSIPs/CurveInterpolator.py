@@ -399,7 +399,7 @@ class GeneralCurveInterpolator:
 
         return ynew
 
-    def monotone_convex(self) -> np.ndarray:
+    def monotone_convex(self, return_func=True) -> np.ndarray:
         mc_spline = MonotoneConvex(terms=self._x, spots=self._y)
         def mc_spline_func(t):
             return [mc_spline.spot(val) for val in t]

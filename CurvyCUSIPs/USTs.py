@@ -442,20 +442,22 @@ class USTs:
         for curr_dt, curve_set_df in tqdm.tqdm(curve_sets.items(), desc="AGGREGATING CURVE SET DFs"):
             last_seen_soma_holdings_df = None
             last_seen_stripping_act_df = None
-            
-            fetched_soma_holdings_dates = [dt for dt in grouped_results["soma_holdings"].keys() if dt < curr_dt]
-            if fetched_soma_holdings_dates:
-                closest = max(fetched_soma_holdings_dates)  
-                last_seen_soma_holdings_df = pl.from_pandas(grouped_results["soma_holdings"][closest])
-            else:
-                raise ValueError("Couldnt find valid SOMA holding dates fetched")
 
-            fetched_ust_stripping_dates = [dt for dt in grouped_results["ust_stripping"].keys() if dt < curr_dt]
-            if fetched_ust_stripping_dates:
-                closest = max(fetched_ust_stripping_dates)  
-                last_seen_stripping_act_df = pl.from_pandas(grouped_results["ust_stripping"][closest])
-            else:
-                raise ValueError("Couldnt find valid UST stripping dates fetched")
+            if fetch_soma_holdings: 
+                fetched_soma_holdings_dates = [dt for dt in grouped_results["soma_holdings"].keys() if dt < curr_dt]
+                if fetched_soma_holdings_dates:
+                    closest = max(fetched_soma_holdings_dates)  
+                    last_seen_soma_holdings_df = pl.from_pandas(grouped_results["soma_holdings"][closest])
+                else:
+                    raise ValueError("Couldnt find valid SOMA holding dates fetched")
+
+            if fetch_stripping_data:
+                fetched_ust_stripping_dates = [dt for dt in grouped_results["ust_stripping"].keys() if dt < curr_dt]
+                if fetched_ust_stripping_dates:
+                    closest = max(fetched_ust_stripping_dates)  
+                    last_seen_stripping_act_df = pl.from_pandas(grouped_results["ust_stripping"][closest])
+                else:
+                    raise ValueError("Couldnt find valid UST stripping dates fetched")
 
             price_df = pl.from_pandas(curve_set_df)
             curr_auctions_df = auctions_df.filter(

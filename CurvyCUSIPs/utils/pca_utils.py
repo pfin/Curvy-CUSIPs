@@ -78,7 +78,7 @@ def calc_pca_loadings_matrix(
         "pca": pca,
         "loading_matrix": loadings_df,
         "pc_scores_matrix": pc_scores_df,
-        "covar_matrix": pd.DataFrame(pca.get_covariance(), index=df.columns, columns=df.columns),
+        "covar_matrix": pd.DataFrame(pca.get_covariance() * 10_000, index=df.columns, columns=df.columns),
     }
 
 
@@ -243,20 +243,21 @@ def run_pca_yield_curve(
         to_return_dict["cumulative_explained_variance"] = cumulative_explained_variance
         to_return_dict["explained_variance"] = explained_variance
 
-        _, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
-        ax1.plot(cumulative_explained_variance, marker="o")
-        ax1.set_xlabel("Number of Components")
-        ax1.set_ylabel("Cumulative Explained Variance")
-        ax1.set_title("Cumulative Explained Variance by PCA Components")
-        ax1.grid(True)
-        ax1.set_xticks(range(1, len(explained_variance) + 1))
+        # _, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 5))
+        # ax1.plot(cumulative_explained_variance, marker="o")
+        # ax1.set_xlabel("Number of Components")
+        # ax1.set_ylabel("Cumulative Explained Variance")
+        # ax1.set_title("Cumulative Explained Variance by PCA Components")
+        # ax1.grid(True)
+        # ax1.set_xticks(range(1, len(explained_variance) + 1))
 
-        ax2.bar(range(1, len(explained_variance) + 1), explained_variance, alpha=0.7)
-        ax2.set_xlabel("Number of Components")
-        ax2.set_ylabel("Individual Explained Variance")
-        ax2.set_title("Individual Explained Variance by PCA Components")
-        ax2.grid(True)
-        ax2.set_xticks(range(1, len(explained_variance) + 1))
+        plt.figure(figsize=(6, 4))
+        plt.bar(range(1, len(explained_variance) + 1), explained_variance, alpha=0.9)
+        plt.xlabel("Number of Components")
+        plt.ylabel("Individual Explained Variance")
+        plt.title("Individual Explained Variance by PCA Components")
+        plt.grid(True)
+        # plt.set_xticks(range(1, len(explained_variance) + 1))
 
         plt.tight_layout()
         plt.show()
@@ -430,7 +431,7 @@ def run_pca_yield_curve(
     if show_pc_scores_timeseries:
         pc1 = data_fitted_transf_pca[:, 0]
         # flipping signs
-        pc2 = -1 * data_fitted_transf_pca[:, 1]
+        pc2 = 1 * data_fitted_transf_pca[:, 1]
         pc3 = -1 * data_fitted_transf_pca[:, 2]
 
         if window:
@@ -450,7 +451,7 @@ def run_pca_yield_curve(
         trend_pc2 = model_pc2.predict(time_values)
         trend_pc3 = model_pc3.predict(time_values)
 
-        _, axes = plt.subplots(3, 1, figsize=(15, 20))
+        _, axes = plt.subplots(3, 1, figsize=(10, 15))
 
         pca_container = [
             {

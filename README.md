@@ -66,6 +66,21 @@ Update SOFR OIS Curve DB:
 python update_sofr_ois._db.py
 ```
 
+Init and update ATM Swaption Vol DB:
+```
+python update_atm_swaption_vol.py
+```
+
+Init Swaption Vol Cube DB
+```
+python update_swaption_vol_cube.py init
+```
+
+Update Swaption Vol Cube DB
+```
+python update_swaption_vol_cube.py
+```
+
 ## Checkout examples in `\notebooks`:
 
 ### [usts_basics.ipynb](https://github.com/yieldcurvemonkey/Curvy-CUSIPs/blob/main/notebooks/usts_basics.ipynb)

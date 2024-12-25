@@ -118,6 +118,7 @@ class S490Swaps:
         ql_compounding=ql.Compounded,
         ql_compounding_freq=ql.Daily,
         use_ql_implied_ts: Optional[bool] = True,
+        level_bps_adj: Optional[int] = 0,
     ) -> Tuple[Dict[datetime, pd.DataFrame], Dict[datetime, ql.DiscountCurve | ql.ZeroCurve | ql.ForwardCurve]]:
         bdates = pd.date_range(start=start_date, end=end_date, freq=CustomBusinessDay(calendar=USFederalHolidayCalendar()))
         fwd_term_structure_grids: Dict[datetime, pd.DataFrame] = {}
@@ -125,6 +126,8 @@ class S490Swaps:
         for curr_date in tqdm.tqdm(bdates, "Building Implied Fwd Curves..."):
             try:
                 str_ts = str(int(curr_date.to_pydatetime().timestamp()))
+                if not self.s490_nyclose_db.exists(str_ts):
+                    continue
                 ql_piecewise_term_struct_nodes: Dict = self.s490_nyclose_db.get(str_ts)[ql_piecewise_method]
                 if "Discount" in ql_piecewise_method:
                     ql_curve = ql.DiscountCurve(
@@ -179,7 +182,7 @@ class S490Swaps:
                             forward_rate = ql_curve_to_use.forwardRate(
                                 fwd_start_date, fwd_end_date, ql.Actual360(), ql_compounding, ql_compounding_freq, True
                             ).rate()
-                            fwds_list.append(forward_rate * 100)
+                            fwds_list.append(forward_rate * 100 + (level_bps_adj / 100))
                         except Exception as e:
                             self._logger.error(f"Error computing forward rate on {curr_date.date()} for {fwd_tenor}x{underlying_tenor}: {e}")
                             fwds_list.append(float("nan"))

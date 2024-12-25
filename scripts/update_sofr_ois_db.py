@@ -219,7 +219,6 @@ if __name__ == "__main__":
                     tenor_to_years(t): {col: curr_ohlc_df.loc[curr_ohlc_df["Tenor"] == t, col].values[0] for col in ["Close"]}
                     for t in curr_ohlc_df["Tenor"]
                 }
-                print("hello2")
 
                 def log_linear_interp1d(x, y, fill_value="extrapolate", **kwargs):
                     log_y = np.log(y)

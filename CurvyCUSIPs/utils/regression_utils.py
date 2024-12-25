@@ -156,7 +156,7 @@ def run_basic_linear_regression_df(
         se_intercept = results.bse[0]
         se_slope = results.bse[1]
 
-    plt.figure(figsize=(20, 10))
+    plt.figure(figsize=(15, 10))
 
     if date_color_bar:
         df["date_numeric"] = (df["Date"] - df["Date"].min()).dt.total_seconds()

@@ -276,7 +276,7 @@ def plot_usts(
     curve_set_df = curve_set_df.copy()
 
     # how i price tbills with rateslib is still a bit janky so not to throw off our plotting i will filter
-    curve_set_df = curve_set_df[curve_set_df[ytm_col] < curve_set_df[ytm_col].quantile(0.985)] 
+    curve_set_df = curve_set_df[curve_set_df[ytm_col] < curve_set_df[ytm_col].quantile(0.985)]
 
     if cusips_filter:
         curve_set_df = curve_set_df[curve_set_df["cusip"].isin(cusips_filter)]
@@ -321,6 +321,11 @@ def plot_usts(
             )
         )
     fig.add_traces(otr_fig.data)
+
+    to_return = {
+        "par": {},
+        "implied_par": {}
+    }
 
     if cusips_hightlighter:
         if isinstance(cusips_hightlighter[0], tuple):
@@ -429,6 +434,7 @@ def plot_usts(
             if not len(curve_tup) == 3:
                 curve_tup = curve_tup + (False,)
             interp_func, label, is_parametric_class = curve_tup
+            to_return["par"][label] = interp_func
             fig.add_trace(
                 go.Scatter(
                     x=cfs,
@@ -514,12 +520,12 @@ def plot_usts(
             )
 
     if impl_par_n_yr_fwd_curves:
-        cfs = np.arange(0.5, 30 + 1, 0.5)
         for curve_tup in impl_par_n_yr_fwd_curves:
             if not len(curve_tup) == 4:
                 curve_tup = curve_tup + (False,)
 
             interp_func, n, label, is_parametric_class = curve_tup
+            cfs = np.arange(0.5, 31 + n, 0.5)
             implied_spot_rates_n_fwd = []
             if is_parametric_class:
                 for t in cfs:
@@ -541,9 +547,10 @@ def plot_usts(
                         implied_spot_rates_n_fwd.append(np.nan)
             implied_spot_rates_n_fwd = np.array(implied_spot_rates_n_fwd)[n * 2 :]
             implied_par_rates_n_fwd_spline = UnivariateSpline(cfs[n * 2 :], implied_spot_rates_n_fwd, s=0, k=3)
+            to_return["implied_par"][str(n)] = implied_par_rates_n_fwd_spline
             fig.add_trace(
                 go.Scatter(
-                    x=cfs[n * 2 :],
+                    x=cfs[: -n * 2 :],
                     y=[par_curve_func(t, implied_par_rates_n_fwd_spline, is_parametric_class) for t in cfs[n * 2 :]],
                     mode="lines",
                     name=label,
@@ -579,3 +586,5 @@ def plot_usts(
         }
     )
     plt.show()
+
+    return to_return

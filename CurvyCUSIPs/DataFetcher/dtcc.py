@@ -30,7 +30,7 @@ from CurvyCUSIPs.utils.dtcc_swaps_utils import (
     datetime_to_ql_date,
     scipy_linear_interp_func,
     tenor_to_years,
-    calculate_tenor_combined
+    calculate_tenor_combined,
 )
 
 warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
@@ -365,8 +365,8 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
         swap_type: Literal["Fixed_Float", "Fixed_Float_OIS", "Fixed_Float_Zero_Coupon"],
         reference_floating_rates: List[
             Literal["USD-SOFR-OIS Compound", "USD-SOFR-COMPOUND", "USD-SOFR", "USD-SOFR Compounded Index", "USD-SOFR CME Term"]
-        ], # not an exhaustive list - most common
-        ccy: Literal["USD", "EUR", "JPY", "GBP"], # not an exhaustive list - most common
+        ],  # not an exhaustive list - most common
+        ccy: Literal["USD", "EUR", "JPY", "GBP"],  # not an exhaustive list - most common
         reference_floating_rate_term_value: int,
         reference_floating_rate_term_unit: Literal["DAYS", "WEEK", "MNTH", "YEAR"],
         notional_schedule: Literal["Constant", "Accreting", "Amortizing", "Custom"],
@@ -579,7 +579,6 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
                     df = df[~df["Tenor"].isin(set(tenors_to_interpolate))]
 
                 return df[swap_columns]
-            
 
             def format_swap_ohlc(
                 df: pd.DataFrame,
@@ -602,18 +601,26 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
 
                 if filtered_df.empty or t_plus_another_one:
                     filtered_df = df[(df["Fwd"] == "0D") | (df["Fwd"] == "1D")]
-                    self._logger.warning(f'Initial OHLC Filtering Results: {len(filtered_df)} < {minimum_time_and_sales_trades} --- Enabled "t_plus_another_one"')
+                    self._logger.warning(
+                        f'Initial OHLC Filtering Results: {len(filtered_df)} < {minimum_time_and_sales_trades} --- Enabled "t_plus_another_one"'
+                    )
 
                 if filtered_df.empty or len(filtered_df) < minimum_time_and_sales_trades:
-                    self._logger.warning(f'Initial OHLC Filtering Results: {len(filtered_df)} < {minimum_time_and_sales_trades} --- Enabled "t_plus_another_two"')
+                    self._logger.warning(
+                        f'Initial OHLC Filtering Results: {len(filtered_df)} < {minimum_time_and_sales_trades} --- Enabled "t_plus_another_two"'
+                    )
                     filtered_df = df[(df["Fwd"] == "0D") | (df["Fwd"] == "1D") | (df["Fwd"] == "2D")]
 
                 if filtered_df.empty or len(filtered_df) < minimum_time_and_sales_trades:
-                    self._logger.warning(f'Initial OHLC Filtering Results: {len(filtered_df)} < {minimum_time_and_sales_trades} --- Enabled "t_plus_another_three"')
+                    self._logger.warning(
+                        f'Initial OHLC Filtering Results: {len(filtered_df)} < {minimum_time_and_sales_trades} --- Enabled "t_plus_another_three"'
+                    )
                     filtered_df = df[(df["Fwd"] == "0D") | (df["Fwd"] == "1D") | (df["Fwd"] == "2D") | (df["Fwd"] == "3D")]
 
                 if filtered_df.empty or len(filtered_df) < minimum_time_and_sales_trades:
-                    self._logger.warningprint(f'Initial OHLC Filtering Results: {len(filtered_df)} < {minimum_time_and_sales_trades} --- Enabled "t_plus_another_four"')
+                    self._logger.warningprint(
+                        f'Initial OHLC Filtering Results: {len(filtered_df)} < {minimum_time_and_sales_trades} --- Enabled "t_plus_another_four"'
+                    )
                     filtered_df = df[(df["Fwd"] == "0D") | (df["Fwd"] == "1D") | (df["Fwd"] == "2D") | (df["Fwd"] == "3D") | (df["Fwd"] == "4D")]
 
                 if filter_extreme_time_and_sales and quantile_smoothing_range:
@@ -629,7 +636,10 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
                         lower_quantile = filtered_df[filtered_df["Tenor"] == tenor]["Fixed Rate"].quantile(quantile_range[0])
                         upper_quantile = filtered_df[filtered_df["Tenor"] == tenor]["Fixed Rate"].quantile(quantile_range[1])
                         filtered_df = filtered_df[
-                            ~((filtered_df["Tenor"] == tenor) & ((filtered_df["Fixed Rate"] < lower_quantile) | (filtered_df["Fixed Rate"] > upper_quantile)))
+                            ~(
+                                (filtered_df["Tenor"] == tenor)
+                                & ((filtered_df["Fixed Rate"] < lower_quantile) | (filtered_df["Fixed Rate"] > upper_quantile))
+                            )
                         ]
 
                 if remove_tenors:
@@ -668,7 +678,9 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
                     x_new = np.array([tenor_to_years(t) for t in default_tenors])
                     interp_df = pd.DataFrame({"Tenor": default_tenors})
                     tenor_map = {
-                        tenor_to_years(t): {col: tenor_df.loc[tenor_df["Tenor"] == t, col].values[0] for col in ["Open", "High", "Low", "Close", "VWAP"]}
+                        tenor_to_years(t): {
+                            col: tenor_df.loc[tenor_df["Tenor"] == t, col].values[0] for col in ["Open", "High", "Low", "Close", "VWAP"]
+                        }
                         for t in tenor_df["Tenor"]
                     }
                     for col in ["Open", "High", "Low", "Close", "VWAP"]:
@@ -928,7 +940,7 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
         max_extraction_workers: Optional[int] = 3,
         verbose: Optional[bool] = False,
     ) -> Dict[datetime, pd.DataFrame]:
-        
+
         if start_date < SCHEMA_CHANGE_2022 or end_date < SCHEMA_CHANGE_2022:
             raise NotImplementedError(f"Swaption Data fetching before {SCHEMA_CHANGE_2022} not implemented")
 
@@ -970,7 +982,7 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
         SWAPTION_UPIS = swaption_upi_lookup_df[
             (swaption_upi_lookup_df["Attributes_UnderlyingInstrumentUPI"].isin(UNDERLYING_UPIS))
             & (swaption_upi_lookup_df["Derived_CFIOptionStyleandType"].isin(formatted_exercise_styles))
-            & (swaption_upi_lookup_df["Attributes_NotionalCurrency"] == underlying_ccy) 
+            & (swaption_upi_lookup_df["Attributes_NotionalCurrency"] == underlying_ccy)
         ]["Identifier_UPI"].to_numpy()
 
         with warnings.catch_warnings():
@@ -1031,13 +1043,16 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
                 df = df[df["Strike Price"] > 0]
                 df = df[df["Strike Price"] == df["Fixed rate-Leg 1"].combine_first(df["Fixed rate-Leg 2"])]
                 df["Direction"] = df.apply(
-                    lambda row: "buyer" if pd.notna(row["Fixed rate-Leg 1"]) else ("underwritter" if pd.notna(row["Fixed rate-Leg 2"]) else None), axis=1
+                    lambda row: "buyer" if pd.notna(row["Fixed rate-Leg 1"]) else ("underwritter" if pd.notna(row["Fixed rate-Leg 2"]) else None),
+                    axis=1,
                 )
 
                 if as_of_date < UPI_MIGRATE_DATE:
                     df["Option Type"] = df["Option Type"].str.lower()
                     df["Style"] = df.apply(
-                        lambda row: ("receiver" if "put" in row["Option Type"] else ("payer" if "call" in row["Option Type"] else row["Option Type"])),
+                        lambda row: (
+                            "receiver" if "put" in row["Option Type"] else ("payer" if "call" in row["Option Type"] else row["Option Type"])
+                        ),
                         axis=1,
                     )
                     df["UPI FISN"] = df.apply(
@@ -1058,7 +1073,9 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
                     )
                 else:
                     df["Style"] = df.apply(
-                        lambda row: ("receiver" if "NA/O P Epn" in row["UPI FISN"] else ("payer" if "NA/O Call Epn" in row["UPI FISN"] else row["UPI FISN"])),
+                        lambda row: (
+                            "receiver" if "NA/O P Epn" in row["UPI FISN"] else ("payer" if "NA/O Call Epn" in row["UPI FISN"] else row["UPI FISN"])
+                        ),
                         axis=1,
                     )
 
@@ -1066,12 +1083,15 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
                     lambda row: calculate_tenor_combined(effective_date=row["Effective Date"], expiration_date=row["First exercise date"]), axis=1
                 )
                 df["Underlying Tenor"] = df.apply(
-                    lambda row: calculate_tenor_combined(effective_date=row["First exercise date"], expiration_date=row["Maturity date of the underlier"]), axis=1
+                    lambda row: calculate_tenor_combined(
+                        effective_date=row["First exercise date"], expiration_date=row["Maturity date of the underlier"]
+                    ),
+                    axis=1,
                 )
+                df = df[(df["Option Tenor"].notna()) & (df["Underlying Tenor"].notna())]
                 df["Fwd"] = df.apply(lambda row: f"{(row["Effective Date"] - as_of_date).days}D", axis=1)
                 df["Option Premium per Notional"] = df["Option Premium Amount"] / df["Notional Amount"]
                 return df[swap_columns]
-
 
             for date, time_and_sales_sdr_df in tqdm.tqdm(sdr_time_and_sales_dict.items(), desc="BUILDING SOFR CURVES..."):
                 if time_and_sales_sdr_df is None or time_and_sales_sdr_df.empty:
@@ -1096,8 +1116,12 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
                                 )
                                 & (time_and_sales_sdr_df["Product name"] == "InterestRate:Option:Swaption")
                                 & (time_and_sales_sdr_df["Option Style"].isin([es.upper() for es in swaption_exercise_styles]))
-                                & (time_and_sales_sdr_df["Action type"] == "NEWT")
-                                & (time_and_sales_sdr_df["Event type"] == "TRAD")
+                                & ((time_and_sales_sdr_df["Action type"] == "NEWT") | (time_and_sales_sdr_df["Action type"] == "TERM"))
+                                & (
+                                    (time_and_sales_sdr_df["Event type"] == "TRAD")
+                                    | (time_and_sales_sdr_df["Event type"] == "NOVA")
+                                    | (time_and_sales_sdr_df["Event type"] == "ETRM")
+                                )
                                 # & (time_and_sales_sdr_df["First exercise date"].notna())
                                 & (time_and_sales_sdr_df["Maturity date of the underlier"].notna())
                                 & (time_and_sales_sdr_df["Option Premium Amount"].notna())
@@ -1119,19 +1143,24 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
                     time_and_sales_sdr_df["Option Premium Amount"] = pd.to_numeric(
                         time_and_sales_sdr_df["Option Premium Amount"].str.replace(",", "").replace("+", ""), errors="coerce"
                     )
+                    time_and_sales_sdr_df = time_and_sales_sdr_df[
+                        (time_and_sales_sdr_df["Unique Product Identifier"].isin(SWAPTION_UPIS))
+                        & ((time_and_sales_sdr_df["Action type"] == "NEWT") | (time_and_sales_sdr_df["Action type"] == "TERM"))
+                        & (
+                            (time_and_sales_sdr_df["Event type"] == "TRAD")
+                            | (time_and_sales_sdr_df["Event type"] == "NOVA")
+                            | (time_and_sales_sdr_df["Event type"] == "ETRM")
+                        )
+                        # & (time_and_sales_sdr_df["Package indicator"] == False)
+                        # & (time_and_sales_sdr_df["Non-standardized term indicator"] == False)
+                        & (time_and_sales_sdr_df["Maturity date of the underlier"].notna())
+                        & (time_and_sales_sdr_df["Option Premium Amount"].notna())
+                        & (time_and_sales_sdr_df["Option Premium Amount"] > 5)
+                        & (time_and_sales_sdr_df["Option Premium Currency"] == underlying_ccy)
+                        # & (time_and_sales_sdr_df["UPI FISN"] != "NA/O Opt Epn OIS USD")  # light exotic - chooser
+                    ]
                     swaption_time_and_sales_df: pd.DataFrame = format_vanilla_swaption_time_and_sales(
-                        time_and_sales_sdr_df[
-                            (time_and_sales_sdr_df["Unique Product Identifier"].isin(SWAPTION_UPIS))
-                            & (time_and_sales_sdr_df["Action type"] == "NEWT")
-                            & (time_and_sales_sdr_df["Event type"] == "TRAD")
-                            # & (time_and_sales_sdr_df["Package indicator"] == False)
-                            # & (time_and_sales_sdr_df["Non-standardized term indicator"] == False)
-                            & (time_and_sales_sdr_df["Maturity date of the underlier"].notna())
-                            & (time_and_sales_sdr_df["Option Premium Amount"].notna())
-                            & (time_and_sales_sdr_df["Option Premium Amount"] != 0)
-                            & (time_and_sales_sdr_df["Option Premium Currency"] == underlying_ccy)
-                            & (time_and_sales_sdr_df["UPI FISN"] != "NA/O Opt Epn OIS USD")  # light exotic - chooser
-                        ],
+                        df=time_and_sales_sdr_df,
                         as_of_date=date,
                     )
 
@@ -1140,4 +1169,3 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
                 swaption_time_and_sales_df_dict[date] = swaption_time_and_sales_df
 
         return swaption_time_and_sales_df_dict
- 
