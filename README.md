@@ -121,24 +121,25 @@ python update_swaption_vol_cube.py
 
 ### [calculating_cash_hedge_ratios.ipynb](https://github.com/yieldcurvemonkey/Curvy-CUSIPs/blob/main/notebooks/calculating_cash_hedge_ratios.ipynb)
 
-For DV01 neutrality, if the DV01s of bonds $\text{Oct 26s}$ and $\text{Aug 34s}$ are $\text{DV01}_\text{Oct 26s}$ and $\text{DV01}_\text{Aug 34s}$, then $n_\text{Oct 26s}$ notional of bond $\text{Oct 26s}$ is hedged with $n_\text{Aug 34s}$ notional of bond $\text{Aug 34s}$ such that,
+For DV01 neutrality, if the DV01s of bonds $\text{Oct 26s}$ and $\text{Aug 34s}$ are $DV01_{\text{Oct 26s}}$ and $DV01_{\text{Aug 34s}}$,
+then $n_{\text{Oct 26s}}$ notional of bond $\text{Oct 26s}$ is hedged with $n_{\text{Aug 34s}}$ notional of bond $\text{Aug 34s}$ such that,
 
 $$
-\frac{n_\text{Oct 26s} \, \text{DV01}_\text{Oct 26s}}{100} + \frac{n_\text{Aug 34s} \, \text{DV01}_\text{Aug 34s}}{100} = 0
+\frac{n_{\text{Oct 26s}} DV01_{\text{Oct 26s}}}{100} + \frac{n_{\text{Aug 34s}} DV01_{\text{Aug 34s}}}{100} = 0
 $$
 
 $$
-n_\text{Aug 34s} = -n_\text{Oct 26s} \frac{\text{DV01}_\text{Oct 26s}}{\text{DV01}_\text{Aug 34s}}
+n_{\text{Aug 34s}} = -n_{\text{Oct 26s}} \frac{DV01_\text{Oct 26s}}{DV01_\text{Aug 34s}}
 $$
 
 For regression hedging, we simply weight the above by the $\beta$ we found.
 
 $$
-\frac{n_{\text{Oct 26s}} \, \text{DV01}_{\text{Oct 26s}}}{100} \, \beta + \frac{n_{\text{Aug 34s}} \, \text{DV01}_{\text{Aug 34s}}}{100} = 0
+\frac{n_{\text{Oct 26s}} DV01_{\text{Oct 26s}}}{100} \beta + \frac{n_{\text{Aug 34s}} DV01_{\text{Aug 34s}}}{100} = 0
 $$
 
 $$
-n_{\text{Aug 34s}} = -n_{\text{Oct 26s}} \frac{\text{DV01}_{\text{Oct 26s}}}{\text{DV01}_{\text{Aug 34s}}} \, \beta
+n_{\text{Aug 34s}} = -n_{\text{Oct 26s}} \frac{DV01_{\text{Oct 26s}}}{DV01_{\text{Aug 34s}}} \beta
 $$
 
 We can also extend the PCA framework for hedging purposes. PCA allows us to view and importantly quantify the driving forces of a trade into uncorrelated factors. This allows us to hedge against specific factors. Say for our `4.125% Oct-26s - 3.875% Aug-34s` steepener, we can simply see how changes in the first (level) factor impact the Oct 26s and Aug 34s and choose the hedge ratios in such a way that both net out. We have now exposure only to higher order PCs.
