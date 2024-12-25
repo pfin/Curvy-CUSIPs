@@ -34,6 +34,9 @@ def dv01_neutral_curve_hegde_ratio(
     very_verbose: Optional[bool] = False,
     custom_beta_weighted_title: Optional[str] = None,
 ):
+    if total_trade_par_amount:
+        raise ValueError("'total_trade_par_amount' is broken")
+    
     if isinstance(front_leg_bond_row, pd.Series) or isinstance(front_leg_bond_row, pd.DataFrame):
         front_leg_bond_row = front_leg_bond_row.to_dict("records")[0]
     if isinstance(back_leg_bond_row, pd.Series) or isinstance(back_leg_bond_row, pd.DataFrame):
@@ -170,9 +173,9 @@ def dv01_neutral_butterfly_hegde_ratio(
     if isinstance(back_wing_bond_row, pd.Series) or isinstance(back_wing_bond_row, pd.DataFrame):
         back_wing_bond_row = back_wing_bond_row.to_dict("records")[0]
 
-    front_wing_info = usts_obj.ust_data_fetcher.cusip_to_ust_label(cusip=front_wing_bond_row["cusip"])
-    belly_info = usts_obj.ust_data_fetcher.cusip_to_ust_label(cusip=belly_bond_row["cusip"])
-    back_wing_info = usts_obj.ust_data_fetcher.cusip_to_ust_label(cusip=back_wing_bond_row["cusip"])
+    front_wing_info = usts_obj.cusip_to_ust_label(cusip=front_wing_bond_row["cusip"])
+    belly_info = usts_obj.cusip_to_ust_label(cusip=belly_bond_row["cusip"])
+    back_wing_info = usts_obj.cusip_to_ust_label(cusip=back_wing_bond_row["cusip"])
 
     front_wing_metrics = calc_ust_metrics(
         bond_info=front_wing_info,
@@ -552,7 +555,7 @@ def beta_estimates(
                 )
             )
         else:
-            pc1_beta = ep_y_pc1 / ep_x0_pc1
+            pc1_beta = ep_x0_pc1 / ep_y_pc1
 
     # avoiding divide by zero errors
     small_value = 1e-8

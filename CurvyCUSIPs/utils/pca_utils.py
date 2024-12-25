@@ -61,7 +61,7 @@ def calc_pca_loadings_matrix(
             "PC1": pc_scores_signs_not_flipped[:, 0],
             # https://stackoverflow.com/questions/44765682/in-sklearn-decomposition-pca-why-are-components-negative
             "PC2": -1 * pc_scores_signs_not_flipped[:, 1],
-            "PC3": -1 * pc_scores_signs_not_flipped[:, 2] if len(df.columns) > 3 else None,
+            "PC3": -1 * pc_scores_signs_not_flipped[:, 2] if len(df.columns) >= 3 else None,
         }
     )
 

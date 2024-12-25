@@ -43,7 +43,7 @@ def run_basic_linear_regression(
     slope = results.params[1]
     r_squared = results.rsquared
 
-    plt.figure(figsize=(20, 10))
+    plt.figure(figsize=(12, 6))
     plt.scatter(x_series, y_series)
 
     regression_line = intercept + slope * x_series
