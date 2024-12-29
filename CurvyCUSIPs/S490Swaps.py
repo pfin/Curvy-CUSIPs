@@ -11,6 +11,7 @@ import plotly.graph_objects as go
 import QuantLib as ql
 from joblib import Parallel, delayed
 import tqdm
+from tqdm_joblib import tqdm_joblib
 from pandas.tseries.holiday import USFederalHolidayCalendar
 from pandas.tseries.offsets import BDay, CustomBusinessDay
 from scipy.stats import zscore
@@ -290,10 +291,14 @@ class S490Swaps:
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
         indy_fwd_strips: Optional[bool] = False,
-        N_COMPONENTs: Optional[int] = 3,
+        run_on_level_changes: Optional[bool] = False, 
+        n_components: Optional[int] = 3,
         rm_swap_tenors: Optional[List[str]] = None,
         rolling_window: Optional[int] = None,
-        n_jobs: int = 1,  # note: parallelization can reduce wall-clock time but not overall CPU time
+        n_jobs: Optional[int] = 1,  # note: only for rolling pca, parallelization can reduce wall-clock time but not overall CPU time
+        n_jobs_parent: Optional[int] = None,
+        n_jobs_child: Optional[int] = None,
+        verbose: Optional[bool] = False,
     ):
         df_list = []
         for obs_date, df_forward in fwd_grid_dict.items():
@@ -340,32 +345,30 @@ class S490Swaps:
                 raise ValueError(f"Not enough observations to do rolling PCA of window size={rolling_window}.")
 
             if indy_fwd_strips:
-                fwd_types = long_df.columns.levels[1]
-                rolling_pca_results_dict = {}
+                # two levels of parallelism
+                if n_jobs_parent and n_jobs_child:
+                    fwd_types = long_df.columns.levels[1]
+                    rolling_pca_results_dict = {}
+                    master_residuals_for_anchor = pd.DataFrame(index=long_df.index, columns=long_df.columns, dtype=float)
 
-                master_residuals_for_anchor = pd.DataFrame(index=long_df.index, columns=long_df.columns, dtype=float)
-
-                for fwd_type in tqdm.tqdm(fwd_types, desc="Rolling PCA ON INDY FWD STRIPS"):
-                    sub_df = long_df.xs(fwd_type, axis=1, level="FwdType").loc[sorted_dates]
-
-                    # anchor_idx is an integer pointing to a position in sorted_dates.
-                    def _rolling_pca_worker(anchor_idx):
-                        anchor_date = sorted_dates[anchor_idx]
-                        window_dates = sorted_dates[anchor_idx - rolling_window + 1 : anchor_idx + 1]
+                    # inner worker for anchor_idx
+                    def _rolling_pca_worker(sub_df: pd.DataFrame, sorted_dates_: List[datetime], anchor_idx: int):
+                        anchor_date = sorted_dates_[anchor_idx]
+                        window_dates = sorted_dates_[anchor_idx - rolling_window + 1 : anchor_idx + 1]
                         window_data = sub_df.loc[window_dates]
 
-                        pca = PCA(n_components=N_COMPONENTs)
+                        pca = PCA(n_components=n_components)
                         pca.fit(window_data)
 
                         loadings_df = pd.DataFrame(
                             pca.components_,
                             columns=window_data.columns,
-                            index=[f"PC{i+1}" for i in range(N_COMPONENTs)],
+                            index=[f"PC{i+1}" for i in range(n_components)],
                         )
                         scores_df = pd.DataFrame(
                             pca.transform(window_data),
                             index=window_data.index,
-                            columns=[f"PC{i+1}" for i in range(N_COMPONENTs)],
+                            columns=[f"PC{i+1}" for i in range(n_components)],
                         )
                         reconstructed_window = pd.DataFrame(
                             pca.inverse_transform(pca.transform(window_data)),
@@ -373,17 +376,20 @@ class S490Swaps:
                             columns=window_data.columns,
                         )
                         residuals_window = window_data - reconstructed_window
+
                         anchor_resid = residuals_window.loc[[anchor_date]]
                         residuals_long = residuals_window.stack().reset_index()
                         residuals_long.columns = ["ObsDate", "Tenor", "Residual"]
                         residuals_timeseries_dict = {}
                         for dt_, sub_sub_df in residuals_long.groupby("ObsDate"):
-                            pivoted = sub_sub_df.pivot_table(index="Tenor", values="Residual", aggfunc="first").reset_index()
+                            pivoted = sub_sub_df.pivot_table(index="Tenor", values="Residual", aggfunc="first")
+                            pivoted = pivoted.reset_index()
                             pivoted["period"] = pivoted["Tenor"].apply(lambda x: ql.Period(x))
                             pivoted = pivoted.sort_values(by="period").drop(columns=["period"]).reset_index(drop=True).set_index("Tenor")
                             residuals_timeseries_dict[dt_] = pivoted * 100
 
                         residual_zscores = S490Swaps._calculate_cross_df_zscores(residuals_timeseries_dict)
+
                         return (
                             anchor_date,
                             {
@@ -395,24 +401,175 @@ class S490Swaps:
                                 "residual_timeseries_dict": residuals_timeseries_dict,
                                 "residual_timeseries_zscore_dict": dict(zip(residuals_timeseries_dict.keys(), residual_zscores)),
                                 "rich_cheap_zscore_anchor": residual_zscores[-1] if len(residual_zscores) > 0 else None,
-                                "anchor_resid": anchor_resid,  # also return anchor residual for easy placement in master_residuals
+                                "anchor_resid": anchor_resid,
                             },
                         )
 
-                    anchor_idx_values = range(rolling_window - 1, len(sorted_dates))
-                    par_results = Parallel(n_jobs=n_jobs)(delayed(_rolling_pca_worker)(aidx) for aidx in anchor_idx_values)
-                    fwd_type_dict = dict(par_results)
-                    for anchor_date, res_dict in fwd_type_dict.items():
-                        for tenor_col in res_dict["anchor_resid"].columns:
-                            master_residuals_for_anchor.loc[anchor_date, (tenor_col, fwd_type)] = res_dict["anchor_resid"].loc[anchor_date, tenor_col]
+                    # outer worker for a single fwd_type
+                    def _pca_for_one_fwd_type(fwd_type: str):
+                        sub_df = long_df.xs(fwd_type, axis=1, level="FwdType").loc[sorted_dates]
+                        anchor_idx_values = range(rolling_window - 1, len(sorted_dates))
 
-                    rolling_pca_results_dict[fwd_type] = fwd_type_dict
+                        # parallelize across anchor_idx here, but limit to n_jobs_child.
+                        par_results = Parallel(n_jobs=n_jobs_child)(
+                            delayed(_rolling_pca_worker)(sub_df, sorted_dates, aidx) for aidx in anchor_idx_values
+                        )
+                        return fwd_type, dict(par_results)
 
-                return {
-                    "rolling_windows": rolling_window,
-                    "rolling_pca_results_per_fwd": rolling_pca_results_dict,
-                    "master_anchor_date_residuals": master_residuals_for_anchor,
-                }
+                    # outer parallel over fwd_types, using n_jobs_parent for the outer level
+                    # fwd_types_results = Parallel(n_jobs=n_jobs_parent)(
+                    #     delayed(_pca_for_one_fwd_type)(fwd_type)
+                    #     for fwd_type in tqdm.tqdm(fwd_types, desc="ROLLING PCA ON INDY FWDs (parent loop)...")
+                    # )
+                    fwd_types_results = [
+                        result
+                        for result in tqdm.tqdm(
+                            Parallel(return_as="generator", n_jobs=n_jobs_parent)(delayed(_pca_for_one_fwd_type)(fwd_type) for fwd_type in fwd_types),
+                            desc="ROLLING PCA ON INDY FWDs (parent loop)...",
+                            total=len(fwd_types),
+                        )
+                    ]
+
+                    for fwd_type, fwd_type_dict in tqdm.tqdm(fwd_types_results, desc="CLEANING UP ROLLING PCA RESULTS..."):
+                        rolling_pca_results_dict[fwd_type] = fwd_type_dict
+                        for anchor_date, res_dict in fwd_type_dict.items():
+                            anchor_resid_df = res_dict["anchor_resid"]
+                            for tenor_col in anchor_resid_df.columns:
+                                master_residuals_for_anchor.loc[anchor_date, (tenor_col, fwd_type)] = anchor_resid_df.loc[anchor_date, tenor_col]
+
+                    rich_cheap_residual_zscore_timeseries_dict: Dict[datetime, pd.DataFrame] = {}
+                    for anchor_date in long_df.index:
+                        curr_rich_cheap_residual_zscore_timeseries_dict = {}
+                        for fwd_type in fwd_types:
+                            if anchor_date in rolling_pca_results_dict[fwd_type]:
+                                rc_anchor = rolling_pca_results_dict[fwd_type][anchor_date]["rich_cheap_zscore_anchor"]
+                                if rc_anchor is not None:
+                                    curr_rich_cheap_residual_zscore_timeseries_dict[fwd_type] = rc_anchor["Residual"]
+
+                        curr_rich_cheap_residual_zscore_df = pd.DataFrame(curr_rich_cheap_residual_zscore_timeseries_dict)
+                        if not curr_rich_cheap_residual_zscore_df.empty:
+                            curr_rich_cheap_residual_zscore_df = curr_rich_cheap_residual_zscore_df[
+                                sorted(curr_rich_cheap_residual_zscore_df.columns, key=lambda x: _ql_period_wrapper(x))
+                            ]
+                        rich_cheap_residual_zscore_timeseries_dict[anchor_date] = curr_rich_cheap_residual_zscore_df
+
+                    return {
+                        "rolling_windows": rolling_window,
+                        "rolling_pca_results_per_fwd": rolling_pca_results_dict,
+                        "master_anchor_date_residuals": master_residuals_for_anchor,
+                        "rich_cheap_residual_zscore_timeseries_dict": rich_cheap_residual_zscore_timeseries_dict,
+                    }
+
+                # single level of parallelism
+                else:
+                    fwd_types = long_df.columns.levels[1]
+                    rolling_pca_results_dict = {}
+
+                    master_residuals_for_anchor = pd.DataFrame(index=long_df.index, columns=long_df.columns, dtype=float)
+
+                    for fwd_type in tqdm.tqdm(fwd_types, desc="ROLLING PCA ON INDY FWD STRIPS...", total=len(fwd_types)):
+                        sub_df = long_df.xs(fwd_type, axis=1, level="FwdType").loc[sorted_dates]
+
+                        # anchor_idx is an integer pointing to a position in sorted_dates.
+                        def _rolling_pca_worker(anchor_idx: int):
+                            anchor_date = sorted_dates[anchor_idx]
+                            window_dates = sorted_dates[anchor_idx - rolling_window + 1 : anchor_idx + 1]
+                            window_data = sub_df.loc[window_dates]
+
+                            pca = PCA(n_components=n_components)
+                            pca.fit(window_data)
+
+                            loadings_df = pd.DataFrame(
+                                pca.components_,
+                                columns=window_data.columns,
+                                index=[f"PC{i+1}" for i in range(n_components)],
+                            )
+                            scores_df = pd.DataFrame(
+                                pca.transform(window_data),
+                                index=window_data.index,
+                                columns=[f"PC{i+1}" for i in range(n_components)],
+                            )
+                            reconstructed_window = pd.DataFrame(
+                                pca.inverse_transform(pca.transform(window_data)),
+                                index=window_data.index,
+                                columns=window_data.columns,
+                            )
+                            residuals_window = window_data - reconstructed_window
+                            anchor_resid = residuals_window.loc[[anchor_date]]
+                            residuals_long = residuals_window.stack().reset_index()
+                            residuals_long.columns = ["ObsDate", "Tenor", "Residual"]
+                            residuals_timeseries_dict = {}
+                            for dt_, sub_sub_df in residuals_long.groupby("ObsDate"):
+                                pivoted = sub_sub_df.pivot_table(index="Tenor", values="Residual", aggfunc="first").reset_index()
+                                pivoted["period"] = pivoted["Tenor"].apply(lambda x: ql.Period(x))
+                                pivoted = pivoted.sort_values(by="period").drop(columns=["period"]).reset_index(drop=True).set_index("Tenor")
+                                residuals_timeseries_dict[dt_] = pivoted * 100
+
+                            residual_zscores = S490Swaps._calculate_cross_df_zscores(residuals_timeseries_dict)
+
+                            return (
+                                anchor_date,
+                                {
+                                    "explained_variance_ratio_": pca.explained_variance_ratio_,
+                                    "loadings_df": loadings_df,
+                                    "scores_df": scores_df,
+                                    "reconstructed_window": reconstructed_window,
+                                    "residuals_window": residuals_window,
+                                    "residual_timeseries_dict": residuals_timeseries_dict,
+                                    "residual_timeseries_zscore_dict": dict(zip(residuals_timeseries_dict.keys(), residual_zscores)),
+                                    "rich_cheap_zscore_anchor": residual_zscores[-1] if len(residual_zscores) > 0 else None,
+                                    "anchor_resid": anchor_resid,  # also return anchor residual for easy placement in master_residuals
+                                },
+                            )
+
+                        anchor_idx_values = range(rolling_window - 1, len(sorted_dates))
+                        if verbose:
+                            # par_results = [
+                            #     result
+                            #     for result in tqdm.tqdm(
+                            #         Parallel(return_as="generator", n_jobs=n_jobs)(delayed(_rolling_pca_worker)(aidx) for aidx in anchor_idx_values),
+                            #         desc=f"{fwd_type} STRIP ROLLING PCA CALC...",
+                            #         total=len(anchor_idx_values),
+                            #     )
+                            # ]
+                            par_results = Parallel(n_jobs=n_jobs)(
+                                delayed(_rolling_pca_worker)(aidx)
+                                for aidx in tqdm.tqdm(anchor_idx_values, desc=f"{fwd_type} STRIP ROLLING PCA CALC...")
+                            )
+                        else:
+                            par_results = Parallel(n_jobs=n_jobs)(delayed(_rolling_pca_worker)(aidx) for aidx in anchor_idx_values)
+
+                        fwd_type_dict = dict(par_results)
+                        for anchor_date, res_dict in fwd_type_dict.items():
+                            for tenor_col in res_dict["anchor_resid"].columns:
+                                master_residuals_for_anchor.loc[anchor_date, (tenor_col, fwd_type)] = res_dict["anchor_resid"].loc[
+                                    anchor_date, tenor_col
+                                ]
+
+                        rolling_pca_results_dict[fwd_type] = fwd_type_dict
+
+                    rich_cheap_residual_zscore_timeseries_dict: Dict[datetime, pd.DataFrame] = {}
+                    tenors = rolling_pca_results_dict.keys()
+                    for anchor_date in long_df.index:
+                        curr_rich_cheap_residual_zscore_timeseries_dict = {}
+                        for tenor in tenors:
+                            if anchor_date in rolling_pca_results_dict[tenor]:
+                                curr_rich_cheap_residual_zscore_timeseries_dict[tenor] = rolling_pca_results_dict[tenor][anchor_date][
+                                    "rich_cheap_zscore_anchor"
+                                ]["Residual"]
+
+                        curr_rich_cheap_residual_zscore_df = pd.DataFrame(curr_rich_cheap_residual_zscore_timeseries_dict)
+                        curr_rich_cheap_residual_zscore_df = curr_rich_cheap_residual_zscore_df[
+                            sorted(curr_rich_cheap_residual_zscore_df.columns, key=lambda x: _ql_period_wrapper(x))
+                        ]
+                        rich_cheap_residual_zscore_timeseries_dict[anchor_date] = curr_rich_cheap_residual_zscore_df
+
+                    return {
+                        "rolling_windows": rolling_window,
+                        "rolling_pca_results_per_fwd": rolling_pca_results_dict,
+                        "master_anchor_date_residuals": master_residuals_for_anchor,
+                        "rich_cheap_residual_zscore_timeseries_dict": rich_cheap_residual_zscore_timeseries_dict,
+                    }
 
             else:
                 long_df = long_df.loc[sorted_dates]
@@ -422,18 +579,18 @@ class S490Swaps:
                     window_dates = sorted_dates[anchor_idx - rolling_window + 1 : anchor_idx + 1]
                     window_data = long_df.loc[window_dates]
 
-                    pca = PCA(n_components=N_COMPONENTs)
+                    pca = PCA(n_components=n_components)
                     pca.fit(window_data)
 
                     loadings_df = pd.DataFrame(
                         pca.components_,
                         columns=window_data.columns,
-                        index=[f"PC{i+1}" for i in range(N_COMPONENTs)],
+                        index=[f"PC{i+1}" for i in range(n_components)],
                     )
                     scores_df = pd.DataFrame(
                         pca.transform(window_data),
                         index=window_data.index,
-                        columns=[f"PC{i+1}" for i in range(N_COMPONENTs)],
+                        columns=[f"PC{i+1}" for i in range(n_components)],
                     )
                     reconstructed_window = pd.DataFrame(
                         pca.inverse_transform(pca.transform(window_data)),
@@ -470,19 +627,31 @@ class S490Swaps:
                     )
 
                 anchor_idx_values = range(rolling_window - 1, len(sorted_dates))
-                par_results = Parallel(n_jobs=n_jobs)(delayed(_rolling_pca_worker)(aidx) for aidx in anchor_idx_values)
+                # with tqdm_joblib(tqdm.tqdm(total=len(anchor_idx_values))):
+                #     par_results = Parallel(n_jobs=n_jobs)(delayed(_rolling_pca_worker)(aidx) for aidx in anchor_idx_values)
+                par_results = Parallel(n_jobs=n_jobs)(
+                    delayed(_rolling_pca_worker)(aidx) for aidx in tqdm.tqdm(anchor_idx_values, desc="ROLLING PCA ON FWD GRID...")
+                )
                 rolling_pca_results_dict = dict(par_results)
 
                 master_residuals_for_anchor = pd.DataFrame(index=long_df.index, columns=long_df.columns, dtype=float)
-                for anchor_date, res_dict in rolling_pca_results_dict.items():
+                for anchor_date, res_dict in tqdm.tqdm(rolling_pca_results_dict.items(), desc="CLEANING UP ROLLING PCA RESULTS..."):
                     anchor_resid = res_dict["anchor_resid"]
                     for col_ in anchor_resid.columns:
                         master_residuals_for_anchor.loc[anchor_date, col_] = anchor_resid.loc[anchor_date, col_]
+
+                rich_cheap_residual_zscore_timeseries_dict: Dict[datetime, pd.DataFrame] = {}
+                for anchor_date in long_df.index:
+                    if anchor_date in rolling_pca_results_dict:
+                        rich_cheap_residual_zscore_timeseries_dict[anchor_date] = rolling_pca_results_dict[anchor_date]["rich_cheap_zscore_anchor"]
+                    else:
+                        rich_cheap_residual_zscore_timeseries_dict[anchor_date] = None
 
                 return {
                     "rolling_windows": rolling_window,
                     "rolling_pca_results": rolling_pca_results_dict,
                     "master_anchor_date_residuals": master_residuals_for_anchor,
+                    "rich_cheap_residual_zscore_timeseries_dict": rich_cheap_residual_zscore_timeseries_dict,
                 }
 
         else:
@@ -493,12 +662,12 @@ class S490Swaps:
                 residuals_all = pd.DataFrame(index=long_df.index, columns=long_df.columns, dtype=float)
                 fwd_types = long_df.columns.levels[1]
 
-                for fwd_type in tqdm.tqdm(fwd_types, desc="PCA ON INDY FWD STRIPS"):
+                for fwd_type in tqdm.tqdm(fwd_types, desc="PCA ON INDY FWD STRIPS..."):
                     sub_df = long_df.xs(fwd_type, axis=1, level="FwdType")
-                    pca = PCA(n_components=N_COMPONENTs)
+                    pca = PCA(n_components=n_components)
                     pca.fit(sub_df)
-                    loadings_df = pd.DataFrame(pca.components_, columns=sub_df.columns, index=[f"PC{i+1}" for i in range(N_COMPONENTs)])
-                    scores_df = pd.DataFrame(pca.transform(sub_df), index=sub_df.index, columns=[f"PC{i+1}" for i in range(N_COMPONENTs)])
+                    loadings_df = pd.DataFrame(pca.components_, columns=sub_df.columns, index=[f"PC{i+1}" for i in range(n_components)])
+                    scores_df = pd.DataFrame(pca.transform(sub_df), index=sub_df.index, columns=[f"PC{i+1}" for i in range(n_components)])
                     reconstructed_sub = pd.DataFrame(pca.inverse_transform(pca.transform(sub_df)), index=sub_df.index, columns=sub_df.columns)
                     residuals_sub = sub_df - reconstructed_sub
 
@@ -542,17 +711,17 @@ class S490Swaps:
                     "residual_timeseries_dict": _merge_residuals_by_date(
                         {fwd_type: pca_results_dict[fwd_type]["residual_timeseries_dict"] for fwd_type in pca_results_dict.keys()}
                     ),
-                    "residual_timeseries_zscore_dict": _merge_residuals_by_date(
+                    "rich_cheap_residual_zscore_timeseries_dict": _merge_residuals_by_date(
                         {fwd_type: pca_results_dict[fwd_type]["residual_timeseries_zscore_dict"] for fwd_type in pca_results_dict.keys()}
                     ),
                     "rich_cheap_zscore_heatmap": rich_cheap_map_df,
                 }
 
             else:
-                pca = PCA(n_components=N_COMPONENTs)
+                pca = PCA(n_components=n_components)
                 pca.fit(long_df)
-                loadings_df = pd.DataFrame(data=pca.components_, columns=long_df.columns, index=[f"PC{i+1}" for i in range(N_COMPONENTs)])
-                scores_df = pd.DataFrame(data=pca.transform(long_df), index=long_df.index, columns=[f"PC{i+1}" for i in range(N_COMPONENTs)])
+                loadings_df = pd.DataFrame(data=pca.components_, columns=long_df.columns, index=[f"PC{i+1}" for i in range(n_components)])
+                scores_df = pd.DataFrame(data=pca.transform(long_df), index=long_df.index, columns=[f"PC{i+1}" for i in range(n_components)])
                 reconstructed_df = pd.DataFrame(data=pca.inverse_transform(pca.transform(long_df)), index=long_df.index, columns=long_df.columns)
 
                 residuals_df = long_df - reconstructed_df
@@ -575,19 +744,21 @@ class S490Swaps:
                     "reconstructed_df": reconstructed_df,
                     "residuals_df": residuals_df,
                     "residual_timeseries_dict": residuals_timeseries_dict,
-                    "residual_timeseries_zscore_dict": dict(zip(residuals_timeseries_dict.keys(), residual_zscores)),
+                    "rich_cheap_residual_zscore_timeseries_dict": dict(zip(residuals_timeseries_dict.keys(), residual_zscores)),
                     "rich_cheap_zscore_heatmap": residual_zscores[-1],
                 }
 
     @staticmethod
-    def pca_residual_timeseries_plotter(pca_results: Dict, tenors_to_plot: List[str], use_plotly: Optional[bool] = False):
+    def pca_residual_timeseries_plotter(
+        pca_results: Dict, tenors_to_plot: List[str], use_plotly: Optional[bool] = False, key: Optional[str] = "residual_timeseries_dict"
+    ):
         tenors_to_plot = list(set(tenors_to_plot))
-        residuals_df_dict: Dict[datetime, pd.DataFrame] = pca_results["residual_timeseries_dict"]
+        residuals_df_dict: Dict[datetime, pd.DataFrame] = pca_results[key]
         _general_fwd_dict_df_timeseries_plotter(
             fwd_dict_df=residuals_df_dict,
             tenors_to_plot=tenors_to_plot,
-            bdates=list(residuals_df_dict.keys()),
-            tqdm_desc="PLOTTING PCA RESIDS",
+            bdates=list([key for key in residuals_df_dict.keys() if residuals_df_dict[key] is not None]),
+            tqdm_desc="PLOTTING PCA RESIDUAL ZSCORES",
             custom_title=f"PCA Residuals: {tenors_to_plot[0] if len(tenors_to_plot) == 0 else ", ".join(tenors_to_plot)}",
             yaxis_title="Residuals (bps)",
             tenor_is_df_index=True,
@@ -821,6 +992,10 @@ class S490Swaps:
             top_bfly_df = bfly_df.sort_values("ZScore-Spread", ascending=False, key=lambda x: np.abs(x)).head(top_n).reset_index(drop=True)
 
             return {"curve": top_curve_df, "fly": top_bfly_df}
+
+    @staticmethod
+    def backtester():
+        pass
 
 
 def _general_fwd_dict_df_timeseries_plotter(
