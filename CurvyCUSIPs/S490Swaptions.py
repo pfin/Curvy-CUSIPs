@@ -165,6 +165,7 @@ class S490Swaptions:
             Z = vol_surface_df.values
 
             fig = go.Figure(data=[go.Surface(z=Z, x=X, y=Y, colorscale="RdYlGn_r", showscale=True)])
+            fig.update_traces(contours_z=dict(show=True, usecolormap=True, highlightcolor="limegreen", project_z=True))
             fig.update_layout(
                 title=title,
                 scene=dict(
