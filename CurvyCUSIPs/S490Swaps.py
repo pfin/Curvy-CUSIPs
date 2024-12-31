@@ -262,15 +262,16 @@ class S490Swaps:
         bdates: List[pd.Timestamp],
         custom_title: Optional[str] = None,
         use_plotly: Optional[bool] = False,
+        custom_fly_weights: Optional[Annotated[List[float], 3]] = None,
     ):
-        _general_fwd_dict_df_timeseries_plotter(
+        S490Swaps._general_fwd_dict_df_timeseries_plotter(
             fwd_dict_df=fwd_grid_dict,
             tenors_to_plot=tenors_to_plot,
             bdates=bdates,
             tqdm_desc="PLOTTING SWAPS",
             custom_title=custom_title,
             use_plotly=use_plotly,
-            should_scale_spreads=True,
+            custom_fly_weights=custom_fly_weights,
         )
 
     @staticmethod
@@ -291,7 +292,7 @@ class S490Swaps:
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
         indy_fwd_strips: Optional[bool] = False,
-        run_on_level_changes: Optional[bool] = False, 
+        run_on_level_changes: Optional[bool] = False,
         n_components: Optional[int] = 3,
         rm_swap_tenors: Optional[List[str]] = None,
         rolling_window: Optional[int] = None,
@@ -345,58 +346,82 @@ class S490Swaps:
                 raise ValueError(f"Not enough observations to do rolling PCA of window size={rolling_window}.")
 
             if indy_fwd_strips:
-                # two levels of parallelism
+                # two levels of parallelism for rolling pca on indy fwd strips
                 if n_jobs_parent and n_jobs_child:
                     fwd_types = long_df.columns.levels[1]
                     rolling_pca_results_dict = {}
                     master_residuals_for_anchor = pd.DataFrame(index=long_df.index, columns=long_df.columns, dtype=float)
 
                     # inner worker for anchor_idx
-                    def _rolling_pca_worker(sub_df: pd.DataFrame, sorted_dates_: List[datetime], anchor_idx: int):
+                    def _rolling_pca_worker(sub_df: pd.DataFrame, sorted_dates_, anchor_idx: int, run_on_level_changes: bool):
                         anchor_date = sorted_dates_[anchor_idx]
                         window_dates = sorted_dates_[anchor_idx - rolling_window + 1 : anchor_idx + 1]
                         window_data = sub_df.loc[window_dates]
 
                         pca = PCA(n_components=n_components)
-                        pca.fit(window_data)
 
-                        loadings_df = pd.DataFrame(
-                            pca.components_,
-                            columns=window_data.columns,
-                            index=[f"PC{i+1}" for i in range(n_components)],
-                        )
-                        scores_df = pd.DataFrame(
-                            pca.transform(window_data),
-                            index=window_data.index,
-                            columns=[f"PC{i+1}" for i in range(n_components)],
-                        )
-                        reconstructed_window = pd.DataFrame(
-                            pca.inverse_transform(pca.transform(window_data)),
-                            index=window_data.index,
-                            columns=window_data.columns,
-                        )
-                        residuals_window = window_data - reconstructed_window
+                        if run_on_level_changes:
+                            window_diff = window_data.diff().fillna(0.0)
+                            pca.fit(window_diff)
+                            reconst_changes = pca.inverse_transform(pca.transform(window_diff))
+                            reconst_changes_df = pd.DataFrame(
+                                reconst_changes,
+                                index=window_diff.index,
+                                columns=window_diff.columns,
+                            )
+                            reconst_levels_window = reconst_changes_df.cumsum() + window_data.iloc[0]
+                            residuals_window = window_data - reconst_levels_window
+                        else:
+                            pca.fit(window_data)
+                            reconst_levels_window = pd.DataFrame(
+                                pca.inverse_transform(pca.transform(window_data)),
+                                index=window_data.index,
+                                columns=window_data.columns,
+                            )
+                            residuals_window = window_data - reconst_levels_window
 
                         anchor_resid = residuals_window.loc[[anchor_date]]
+
+                        if run_on_level_changes:
+                            loadings_df = pd.DataFrame(
+                                pca.components_,
+                                columns=window_diff.columns,
+                                index=[f"PC{i+1}" for i in range(n_components)],
+                            )
+                            scores_df = pd.DataFrame(
+                                pca.transform(window_diff),
+                                index=window_diff.index,
+                                columns=[f"PC{i+1}" for i in range(n_components)],
+                            )
+                        else:
+                            loadings_df = pd.DataFrame(
+                                pca.components_,
+                                columns=window_data.columns,
+                                index=[f"PC{i+1}" for i in range(n_components)],
+                            )
+                            scores_df = pd.DataFrame(
+                                pca.transform(window_data),
+                                index=window_data.index,
+                                columns=[f"PC{i+1}" for i in range(n_components)],
+                            )
+
                         residuals_long = residuals_window.stack().reset_index()
                         residuals_long.columns = ["ObsDate", "Tenor", "Residual"]
                         residuals_timeseries_dict = {}
                         for dt_, sub_sub_df in residuals_long.groupby("ObsDate"):
-                            pivoted = sub_sub_df.pivot_table(index="Tenor", values="Residual", aggfunc="first")
-                            pivoted = pivoted.reset_index()
+                            pivoted = sub_sub_df.pivot_table(index="Tenor", values="Residual", aggfunc="first").reset_index()
                             pivoted["period"] = pivoted["Tenor"].apply(lambda x: ql.Period(x))
                             pivoted = pivoted.sort_values(by="period").drop(columns=["period"]).reset_index(drop=True).set_index("Tenor")
                             residuals_timeseries_dict[dt_] = pivoted * 100
 
                         residual_zscores = S490Swaps._calculate_cross_df_zscores(residuals_timeseries_dict)
-
                         return (
                             anchor_date,
                             {
                                 "explained_variance_ratio_": pca.explained_variance_ratio_,
                                 "loadings_df": loadings_df,
                                 "scores_df": scores_df,
-                                "reconstructed_window": reconstructed_window,
+                                "reconstructed_window": reconst_levels_window,
                                 "residuals_window": residuals_window,
                                 "residual_timeseries_dict": residuals_timeseries_dict,
                                 "residual_timeseries_zscore_dict": dict(zip(residuals_timeseries_dict.keys(), residual_zscores)),
@@ -412,7 +437,7 @@ class S490Swaps:
 
                         # parallelize across anchor_idx here, but limit to n_jobs_child.
                         par_results = Parallel(n_jobs=n_jobs_child)(
-                            delayed(_rolling_pca_worker)(sub_df, sorted_dates, aidx) for aidx in anchor_idx_values
+                            delayed(_rolling_pca_worker)(sub_df, sorted_dates, aidx, run_on_level_changes) for aidx in anchor_idx_values
                         )
                         return fwd_type, dict(par_results)
 
@@ -425,7 +450,7 @@ class S490Swaps:
                         result
                         for result in tqdm.tqdm(
                             Parallel(return_as="generator", n_jobs=n_jobs_parent)(delayed(_pca_for_one_fwd_type)(fwd_type) for fwd_type in fwd_types),
-                            desc="ROLLING PCA ON INDY FWDs (parent loop)...",
+                            desc="ROLLING PCA ON INDY FWDS..." if not run_on_level_changes else "ROLLING PCA ON INDY FWDS TIME STEP LEVEL CHANGES...",
                             total=len(fwd_types),
                         )
                     ]
@@ -439,19 +464,18 @@ class S490Swaps:
 
                     rich_cheap_residual_zscore_timeseries_dict: Dict[datetime, pd.DataFrame] = {}
                     for anchor_date in long_df.index:
-                        curr_rich_cheap_residual_zscore_timeseries_dict = {}
+                        curr_dict = {}
                         for fwd_type in fwd_types:
                             if anchor_date in rolling_pca_results_dict[fwd_type]:
                                 rc_anchor = rolling_pca_results_dict[fwd_type][anchor_date]["rich_cheap_zscore_anchor"]
                                 if rc_anchor is not None:
-                                    curr_rich_cheap_residual_zscore_timeseries_dict[fwd_type] = rc_anchor["Residual"]
+                                    curr_dict[fwd_type] = rc_anchor["Residual"]
 
-                        curr_rich_cheap_residual_zscore_df = pd.DataFrame(curr_rich_cheap_residual_zscore_timeseries_dict)
-                        if not curr_rich_cheap_residual_zscore_df.empty:
-                            curr_rich_cheap_residual_zscore_df = curr_rich_cheap_residual_zscore_df[
-                                sorted(curr_rich_cheap_residual_zscore_df.columns, key=lambda x: _ql_period_wrapper(x))
-                            ]
-                        rich_cheap_residual_zscore_timeseries_dict[anchor_date] = curr_rich_cheap_residual_zscore_df
+                        curr_df = pd.DataFrame(curr_dict)
+                        if not curr_df.empty:
+                            cols_sorted = sorted(curr_df.columns, key=lambda x: _ql_period_wrapper(x))
+                            curr_df = curr_df[cols_sorted]
+                        rich_cheap_residual_zscore_timeseries_dict[anchor_date] = curr_df
 
                     return {
                         "rolling_windows": rolling_window,
@@ -460,42 +484,72 @@ class S490Swaps:
                         "rich_cheap_residual_zscore_timeseries_dict": rich_cheap_residual_zscore_timeseries_dict,
                     }
 
-                # single level of parallelism
+                # single level of parallelism for rolling PCA on indy fwd strips
                 else:
                     fwd_types = long_df.columns.levels[1]
                     rolling_pca_results_dict = {}
-
                     master_residuals_for_anchor = pd.DataFrame(index=long_df.index, columns=long_df.columns, dtype=float)
 
-                    for fwd_type in tqdm.tqdm(fwd_types, desc="ROLLING PCA ON INDY FWD STRIPS...", total=len(fwd_types)):
+                    for fwd_type in tqdm.tqdm(
+                        fwd_types,
+                        "ROLLING PCA ON INDY FWDS..." if not run_on_level_changes else "ROLLING PCA ON INDY FWDS TIME STEP LEVEL CHANGES...",
+                        total=len(fwd_types),
+                    ):
                         sub_df = long_df.xs(fwd_type, axis=1, level="FwdType").loc[sorted_dates]
 
                         # anchor_idx is an integer pointing to a position in sorted_dates.
-                        def _rolling_pca_worker(anchor_idx: int):
+                        def _rolling_pca_worker(anchor_idx: int, run_on_level_changes: bool):
                             anchor_date = sorted_dates[anchor_idx]
                             window_dates = sorted_dates[anchor_idx - rolling_window + 1 : anchor_idx + 1]
                             window_data = sub_df.loc[window_dates]
 
                             pca = PCA(n_components=n_components)
-                            pca.fit(window_data)
 
-                            loadings_df = pd.DataFrame(
-                                pca.components_,
-                                columns=window_data.columns,
-                                index=[f"PC{i+1}" for i in range(n_components)],
-                            )
-                            scores_df = pd.DataFrame(
-                                pca.transform(window_data),
-                                index=window_data.index,
-                                columns=[f"PC{i+1}" for i in range(n_components)],
-                            )
-                            reconstructed_window = pd.DataFrame(
-                                pca.inverse_transform(pca.transform(window_data)),
-                                index=window_data.index,
-                                columns=window_data.columns,
-                            )
-                            residuals_window = window_data - reconstructed_window
+                            if run_on_level_changes:
+                                window_diff = window_data.diff().fillna(0.0)
+                                pca.fit(window_diff)
+                                reconst_changes = pca.inverse_transform(pca.transform(window_diff))
+                                reconst_changes_df = pd.DataFrame(
+                                    reconst_changes,
+                                    index=window_diff.index,
+                                    columns=window_diff.columns,
+                                )
+                                reconst_levels_window = reconst_changes_df.cumsum() + window_data.iloc[0]
+                                residuals_window = window_data - reconst_levels_window
+                            else:
+                                pca.fit(window_data)
+                                reconst_levels_window = pd.DataFrame(
+                                    pca.inverse_transform(pca.transform(window_data)),
+                                    index=window_data.index,
+                                    columns=window_data.columns,
+                                )
+                                residuals_window = window_data - reconst_levels_window
+
                             anchor_resid = residuals_window.loc[[anchor_date]]
+
+                            if run_on_level_changes:
+                                loadings_df = pd.DataFrame(
+                                    pca.components_,
+                                    columns=window_diff.columns,
+                                    index=[f"PC{i+1}" for i in range(n_components)],
+                                )
+                                scores_df = pd.DataFrame(
+                                    pca.transform(window_diff),
+                                    index=window_diff.index,
+                                    columns=[f"PC{i+1}" for i in range(n_components)],
+                                )
+                            else:
+                                loadings_df = pd.DataFrame(
+                                    pca.components_,
+                                    columns=window_data.columns,
+                                    index=[f"PC{i+1}" for i in range(n_components)],
+                                )
+                                scores_df = pd.DataFrame(
+                                    pca.transform(window_data),
+                                    index=window_data.index,
+                                    columns=[f"PC{i+1}" for i in range(n_components)],
+                                )
+
                             residuals_long = residuals_window.stack().reset_index()
                             residuals_long.columns = ["ObsDate", "Tenor", "Residual"]
                             residuals_timeseries_dict = {}
@@ -506,19 +560,18 @@ class S490Swaps:
                                 residuals_timeseries_dict[dt_] = pivoted * 100
 
                             residual_zscores = S490Swaps._calculate_cross_df_zscores(residuals_timeseries_dict)
-
                             return (
                                 anchor_date,
                                 {
                                     "explained_variance_ratio_": pca.explained_variance_ratio_,
                                     "loadings_df": loadings_df,
                                     "scores_df": scores_df,
-                                    "reconstructed_window": reconstructed_window,
+                                    "reconstructed_window": reconst_levels_window,
                                     "residuals_window": residuals_window,
                                     "residual_timeseries_dict": residuals_timeseries_dict,
                                     "residual_timeseries_zscore_dict": dict(zip(residuals_timeseries_dict.keys(), residual_zscores)),
                                     "rich_cheap_zscore_anchor": residual_zscores[-1] if len(residual_zscores) > 0 else None,
-                                    "anchor_resid": anchor_resid,  # also return anchor residual for easy placement in master_residuals
+                                    "anchor_resid": anchor_resid,
                                 },
                             )
 
@@ -533,11 +586,13 @@ class S490Swaps:
                             #     )
                             # ]
                             par_results = Parallel(n_jobs=n_jobs)(
-                                delayed(_rolling_pca_worker)(aidx)
+                                delayed(_rolling_pca_worker)(aidx, run_on_level_changes)
                                 for aidx in tqdm.tqdm(anchor_idx_values, desc=f"{fwd_type} STRIP ROLLING PCA CALC...")
                             )
                         else:
-                            par_results = Parallel(n_jobs=n_jobs)(delayed(_rolling_pca_worker)(aidx) for aidx in anchor_idx_values)
+                            par_results = Parallel(n_jobs=n_jobs)(
+                                delayed(_rolling_pca_worker)(aidx, run_on_level_changes) for aidx in anchor_idx_values
+                            )
 
                         fwd_type_dict = dict(par_results)
                         for anchor_date, res_dict in fwd_type_dict.items():
@@ -551,18 +606,16 @@ class S490Swaps:
                     rich_cheap_residual_zscore_timeseries_dict: Dict[datetime, pd.DataFrame] = {}
                     tenors = rolling_pca_results_dict.keys()
                     for anchor_date in long_df.index:
-                        curr_rich_cheap_residual_zscore_timeseries_dict = {}
+                        curr_dict = {}
                         for tenor in tenors:
                             if anchor_date in rolling_pca_results_dict[tenor]:
-                                curr_rich_cheap_residual_zscore_timeseries_dict[tenor] = rolling_pca_results_dict[tenor][anchor_date][
-                                    "rich_cheap_zscore_anchor"
-                                ]["Residual"]
+                                curr_dict[tenor] = rolling_pca_results_dict[tenor][anchor_date]["rich_cheap_zscore_anchor"]["Residual"]
 
-                        curr_rich_cheap_residual_zscore_df = pd.DataFrame(curr_rich_cheap_residual_zscore_timeseries_dict)
-                        curr_rich_cheap_residual_zscore_df = curr_rich_cheap_residual_zscore_df[
-                            sorted(curr_rich_cheap_residual_zscore_df.columns, key=lambda x: _ql_period_wrapper(x))
-                        ]
-                        rich_cheap_residual_zscore_timeseries_dict[anchor_date] = curr_rich_cheap_residual_zscore_df
+                        curr_df = pd.DataFrame(curr_dict)
+                        if not curr_df.empty:
+                            cols_sorted = sorted(curr_df.columns, key=lambda x: _ql_period_wrapper(x))
+                            curr_df = curr_df[cols_sorted]
+                        rich_cheap_residual_zscore_timeseries_dict[anchor_date] = curr_df
 
                     return {
                         "rolling_windows": rolling_window,
@@ -571,6 +624,7 @@ class S490Swaps:
                         "rich_cheap_residual_zscore_timeseries_dict": rich_cheap_residual_zscore_timeseries_dict,
                     }
 
+            # rolling pca across fwd grid
             else:
                 long_df = long_df.loc[sorted_dates]
 
@@ -654,26 +708,56 @@ class S490Swaps:
                     "rich_cheap_residual_zscore_timeseries_dict": rich_cheap_residual_zscore_timeseries_dict,
                 }
 
+        # non-rolling pca case
         else:
+
+            # non-rolling pca on indy fwd strips 
             if indy_fwd_strips:
-                pca_results_dict = {}
-
-                reconstructed_all = pd.DataFrame(index=long_df.index, columns=long_df.columns, dtype=float)
-                residuals_all = pd.DataFrame(index=long_df.index, columns=long_df.columns, dtype=float)
-                fwd_types = long_df.columns.levels[1]
-
-                for fwd_type in tqdm.tqdm(fwd_types, desc="PCA ON INDY FWD STRIPS..."):
+                def _pca_for_one_fwd_type(fwd_type: str):
                     sub_df = long_df.xs(fwd_type, axis=1, level="FwdType")
-                    pca = PCA(n_components=n_components)
-                    pca.fit(sub_df)
-                    loadings_df = pd.DataFrame(pca.components_, columns=sub_df.columns, index=[f"PC{i+1}" for i in range(n_components)])
-                    scores_df = pd.DataFrame(pca.transform(sub_df), index=sub_df.index, columns=[f"PC{i+1}" for i in range(n_components)])
-                    reconstructed_sub = pd.DataFrame(pca.inverse_transform(pca.transform(sub_df)), index=sub_df.index, columns=sub_df.columns)
-                    residuals_sub = sub_df - reconstructed_sub
 
-                    for tenor_col in sub_df.columns:
-                        reconstructed_all[(tenor_col, fwd_type)] = reconstructed_sub[tenor_col]
-                        residuals_all[(tenor_col, fwd_type)] = residuals_sub[tenor_col]
+                    if run_on_level_changes:
+                        sub_df_diff = sub_df.diff().fillna(0.0)
+                        pca = PCA(n_components=n_components)
+                        pca.fit(sub_df_diff)
+
+                        reconst_changes = pca.inverse_transform(pca.transform(sub_df_diff))
+                        reconst_changes_df = pd.DataFrame(reconst_changes, index=sub_df_diff.index, columns=sub_df_diff.columns)
+
+                        reconst_levels_df = reconst_changes_df.cumsum() + sub_df.iloc[0]
+                        reconstructed_sub = reconst_levels_df
+                        residuals_sub = sub_df - reconstructed_sub
+
+                        loadings_df = pd.DataFrame(
+                            pca.components_,
+                            columns=sub_df_diff.columns,
+                            index=[f"PC{i+1}" for i in range(n_components)],
+                        )
+                        scores_df = pd.DataFrame(
+                            pca.transform(sub_df_diff),
+                            index=sub_df_diff.index,
+                            columns=[f"PC{i+1}" for i in range(n_components)],
+                        )
+
+                    else:
+                        pca = PCA(n_components=n_components)
+                        pca.fit(sub_df)
+                        loadings_df = pd.DataFrame(
+                            pca.components_,
+                            columns=sub_df.columns,
+                            index=[f"PC{i+1}" for i in range(n_components)],
+                        )
+                        scores_df = pd.DataFrame(
+                            pca.transform(sub_df),
+                            index=sub_df.index,
+                            columns=[f"PC{i+1}" for i in range(n_components)],
+                        )
+                        reconstructed_sub = pd.DataFrame(
+                            pca.inverse_transform(pca.transform(sub_df)),
+                            index=sub_df.index,
+                            columns=sub_df.columns,
+                        )
+                        residuals_sub = sub_df - reconstructed_sub
 
                     residuals_long = residuals_sub.stack().reset_index()
                     residuals_long.columns = ["ObsDate", "Tenor", "Residual"]
@@ -685,7 +769,7 @@ class S490Swaps:
                         residuals_timeseries_dict[obs_date] = pivoted * 100
 
                     residual_zscores = S490Swaps._calculate_cross_df_zscores(residuals_timeseries_dict)
-                    pca_results_dict[fwd_type] = {
+                    pca_dict = {
                         "explained_variance_ratio_": pca.explained_variance_ratio_,
                         "loadings_df": loadings_df,
                         "scores_df": scores_df,
@@ -693,14 +777,36 @@ class S490Swaps:
                         "residuals_df_sub": residuals_sub,
                         "residual_timeseries_dict": residuals_timeseries_dict,
                         "residual_timeseries_zscore_dict": dict(zip(residuals_timeseries_dict.keys(), residual_zscores)),
-                        "rich_cheap_zscore_heatmap": residual_zscores[-1],
+                        "rich_cheap_zscore_heatmap": residual_zscores[-1] if residual_zscores else None,
                     }
+                    return (fwd_type, pca_dict, reconstructed_sub, residuals_sub)
+
+                pca_results_dict = {}
+                reconstructed_all = pd.DataFrame(index=long_df.index, columns=long_df.columns, dtype=float)
+                residuals_all = pd.DataFrame(index=long_df.index, columns=long_df.columns, dtype=float)
+                fwd_types = long_df.columns.levels[1]
+                par_results = Parallel(n_jobs=n_jobs)(
+                    delayed(_pca_for_one_fwd_type)(fwd_type) for fwd_type in tqdm.tqdm(fwd_types, desc="PCA ON INDY FWD STRIPS...")
+                )
+
+                for fwd_type, pca_dict, reconstructed_sub, residuals_sub in tqdm.tqdm(
+                    par_results, desc="CLEANING UP PCA ON INDY FWD STRIPS RESULTS..."
+                ):
+                    pca_results_dict[fwd_type] = pca_dict
+                    for tenor_col in reconstructed_sub.columns:
+                        reconstructed_all[(tenor_col, fwd_type)] = reconstructed_sub[tenor_col]
+                        residuals_all[(tenor_col, fwd_type)] = residuals_sub[tenor_col]
 
                 residuals_long_all = residuals_all.stack(["Tenor", "FwdType"]).reset_index()
                 residuals_long_all.columns = ["ObsDate", "Tenor", "FwdType", "Residual"]
-                rich_cheap_map_df = pd.concat(
-                    {fwd_type: pca_results_dict[fwd_type]["rich_cheap_zscore_heatmap"] for fwd_type in pca_results_dict.keys()}, axis=1
-                )
+
+                heatmap_dict = {}
+                for fwd_type in pca_results_dict.keys():
+                    heat = pca_results_dict[fwd_type]["rich_cheap_zscore_heatmap"]
+                    # Only add if not None
+                    if heat is not None:
+                        heatmap_dict[fwd_type] = heat
+                rich_cheap_map_df = pd.concat(heatmap_dict, axis=1)
                 rich_cheap_map_df.columns = rich_cheap_map_df.columns.get_level_values(0)
                 rich_cheap_map_df = rich_cheap_map_df[sorted(rich_cheap_map_df.columns, key=lambda x: _ql_period_wrapper(x))]
 
@@ -718,11 +824,48 @@ class S490Swaps:
                 }
 
             else:
-                pca = PCA(n_components=n_components)
-                pca.fit(long_df)
-                loadings_df = pd.DataFrame(data=pca.components_, columns=long_df.columns, index=[f"PC{i+1}" for i in range(n_components)])
-                scores_df = pd.DataFrame(data=pca.transform(long_df), index=long_df.index, columns=[f"PC{i+1}" for i in range(n_components)])
-                reconstructed_df = pd.DataFrame(data=pca.inverse_transform(pca.transform(long_df)), index=long_df.index, columns=long_df.columns)
+                if run_on_level_changes:
+                    long_df_diff = long_df.diff().fillna(0.0)
+                    pca = PCA(n_components=n_components)
+                    pca.fit(long_df_diff)
+                    loadings_df = pd.DataFrame(
+                        data=pca.components_,
+                        columns=long_df_diff.columns,
+                        index=[f"PC{i+1}" for i in range(n_components)],
+                    )
+                    scores_df = pd.DataFrame(
+                        data=pca.transform(long_df_diff),
+                        index=long_df_diff.index,
+                        columns=[f"PC{i+1}" for i in range(n_components)],
+                    )
+                    reconstructed_diff = pca.inverse_transform(pca.transform(long_df_diff))
+                    reconstructed_diff_df = pd.DataFrame(
+                        reconstructed_diff,
+                        index=long_df_diff.index,
+                        columns=long_df_diff.columns,
+                    )
+                    reconstructed_df = reconstructed_diff_df.cumsum() + long_df.iloc[0]
+                    residuals_df = long_df - reconstructed_df
+
+                else:
+                    pca = PCA(n_components=n_components)
+                    pca.fit(long_df)
+                    loadings_df = pd.DataFrame(
+                        data=pca.components_,
+                        columns=long_df.columns,
+                        index=[f"PC{i+1}" for i in range(n_components)],
+                    )
+                    scores_df = pd.DataFrame(
+                        data=pca.transform(long_df),
+                        index=long_df.index,
+                        columns=[f"PC{i+1}" for i in range(n_components)],
+                    )
+                    reconstructed_df = pd.DataFrame(
+                        data=pca.inverse_transform(pca.transform(long_df)),
+                        index=long_df.index,
+                        columns=long_df.columns,
+                    )
+                    residuals_df = long_df - reconstructed_df
 
                 residuals_df = long_df - reconstructed_df
                 residuals_long = residuals_df.stack(["Tenor", "FwdType"]).reset_index()
@@ -750,20 +893,24 @@ class S490Swaps:
 
     @staticmethod
     def pca_residual_timeseries_plotter(
-        pca_results: Dict, tenors_to_plot: List[str], use_plotly: Optional[bool] = False, key: Optional[str] = "residual_timeseries_dict"
+        pca_results: Dict,
+        tenors_to_plot: List[str],
+        use_plotly: Optional[bool] = False,
+        key: Optional[str] = "residual_timeseries_dict",
+        custom_fly_weights: Optional[Annotated[List[float], 3]] = None,
     ):
         tenors_to_plot = list(set(tenors_to_plot))
         residuals_df_dict: Dict[datetime, pd.DataFrame] = pca_results[key]
-        _general_fwd_dict_df_timeseries_plotter(
+        S490Swaps._general_fwd_dict_df_timeseries_plotter(
             fwd_dict_df=residuals_df_dict,
             tenors_to_plot=tenors_to_plot,
-            bdates=list([key for key in residuals_df_dict.keys() if residuals_df_dict[key] is not None]),
+            bdates=list([key for key in residuals_df_dict.keys() if residuals_df_dict[key] is not None and not residuals_df_dict[key].empty]),
             tqdm_desc="PLOTTING PCA RESIDUAL ZSCORES",
             custom_title=f"PCA Residuals: {tenors_to_plot[0] if len(tenors_to_plot) == 0 else ", ".join(tenors_to_plot)}",
             yaxis_title="Residuals (bps)",
             tenor_is_df_index=True,
             use_plotly=use_plotly,
-            should_scale_spreads=False,
+            custom_fly_weights=custom_fly_weights,
         )
 
     @staticmethod
@@ -898,18 +1045,16 @@ class S490Swaps:
 
     @staticmethod
     def most_mispriced_pca_resid_zscores(
-        df,
+        df: pd.DataFrame,
         top_n: Optional[int] = 5,
         across_grid: Optional[bool] = False,
         curve_weights: Optional[Annotated[List[int], 2]] = [1, 1],
         fly_weights: Optional[Annotated[List[int], 3]] = [1, 2, 1],
-    ):
+        exclusive_tenors: Optional[Dict[str, List[str]]] = None,
+        exclude_tenors: Optional[Dict[str, List[str]]] = None,
+    ) -> Dict[Annotated[Literal["curve", "fly"], 2], pd.DataFrame]:
         if across_grid:
-            points = []
-            for tenor in df.index:
-                for fwd in df.columns:
-                    zval = df.loc[tenor, fwd]
-                    points.append((tenor, fwd, zval))
+            points = [(tenor, fwd, df.loc[tenor, fwd]) for tenor in df.index for fwd in df.columns]
 
             curve_records = []
             for p1, p2 in itertools.combinations(points, 2):
@@ -918,14 +1063,18 @@ class S490Swaps:
                 spread = (curve_weights[0] * z1) - (curve_weights[1] * z2)
                 curve_records.append(
                     {
-                        "Tenor1": f"{fwd1.split(" ")[0]}x{tenor1}",
-                        "Tenor2": f"{fwd2.split(" ")[0]}x{tenor2}",
+                        "Tenor1": f"{fwd1}x{tenor1}",
+                        "Tenor2": f"{fwd2}x{tenor2}",
                         "ZScore-Spread": spread,
-                        "Trade": "steepener" if z1 > 0 else "Flattener",
+                        "Trade": "steepener" if spread > 0 else "flattener",
                     }
                 )
 
             curve_df = pd.DataFrame(curve_records)
+            if exclude_tenors:
+                for col, tenors_to_exclude in exclude_tenors.items():
+                    if col in curve_df.columns:
+                        curve_df = curve_df[~curve_df[col].isin(tenors_to_exclude)]
             top_curve_df = curve_df.sort_values("ZScore-Spread", ascending=False, key=lambda x: np.abs(x)).head(top_n).reset_index(drop=True)
 
             bfly_records = []
@@ -936,22 +1085,33 @@ class S490Swaps:
                 bfly = (fly_weights[1] * z2) - (fly_weights[0] * z1) - (fly_weights[2] * z3)
                 bfly_records.append(
                     {
-                        "ShortWing": f"{fwd1.split(" ")[0]}x{tenor1}",
-                        "Belly": f"{fwd2.split(" ")[0]}x{tenor2}",
-                        "LongWing": f"{fwd3.split(" ")[0]}x{tenor3}",
+                        "ShortWing": f"{fwd1}x{tenor1}",
+                        "Belly": f"{fwd2}x{tenor2}",
+                        "LongWing": f"{fwd3}x{tenor3}",
+                        "Full Tenor": f"{fwd1}x{tenor1}-{fwd2}x{tenor2}-{fwd3}x{tenor3}",
                         "ZScore-Spread": bfly,
-                        "Trade": "rec belly" if z2 > 0 else "pay belly",
+                        "Trade": "rec belly" if bfly > 0 else "pay belly",
                     }
                 )
 
             bfly_df = pd.DataFrame(bfly_records)
+            if exclude_tenors:
+                for col, tenors_to_exclude in exclude_tenors.items():
+                    if col in bfly_df.columns:
+                        bfly_df = bfly_df[~bfly_df[col].isin(tenors_to_exclude)]
+
+            if exclusive_tenors:
+                for col, exclusive_tenors in exclusive_tenors.items():
+                    if col in bfly_df.columns:
+                        bfly_df = bfly_df[bfly_df[col].isin(exclusive_tenors)]
+
             top_bfly_df = bfly_df.sort_values("ZScore-Spread", ascending=False, key=lambda x: np.abs(x)).head(top_n).reset_index(drop=True)
 
             return {"curve": top_curve_df, "fly": top_bfly_df}
+
         else:
             curve_records = []
             tenors = df.index.tolist()
-
             for col in df.columns:
                 for t1, t2 in itertools.combinations(tenors, 2):
                     z1 = df.loc[t1, col]
@@ -963,32 +1123,47 @@ class S490Swaps:
                             "Tenor1": t1,
                             "Tenor2": t2,
                             "ZScore-Spread": spread,
-                            "Trade": "steepener" if z1 > 0 else "flattener",
+                            "Trade": "steepener" if spread > 0 else "flattener",
                         }
                     )
 
             curve_df = pd.DataFrame(curve_records)
+            if exclude_tenors:
+                for col, tenors_to_exclude in exclude_tenors.items():
+                    if col in curve_df.columns:
+                        curve_df = curve_df[~curve_df[col].isin(tenors_to_exclude)]
             top_curve_df = curve_df.sort_values("ZScore-Spread", ascending=False, key=lambda x: np.abs(x)).head(top_n).reset_index(drop=True)
 
             bfly_records = []
             for col in df.columns:
-                for t_s, t_m, t_l in itertools.combinations(tenors, 3):
+                for t_s, t_b, t_l in itertools.combinations(tenors, 3):
                     z_s = df.loc[t_s, col]
-                    z_b = df.loc[t_m, col]
+                    z_b = df.loc[t_b, col]
                     z_l = df.loc[t_l, col]
                     bfly = (fly_weights[1] * z_b) - (fly_weights[0] * z_s) - (fly_weights[2] * z_l)
                     bfly_records.append(
                         {
                             "Forward": col,
                             "ShortWing": t_s,
-                            "Belly": t_m,
+                            "Belly": t_b,
                             "LongWing": t_l,
                             "ZScore-Spread": bfly,
-                            "Trade": "rec belly" if z2 > 0 else "pay belly",
+                            "Trade": "rec belly" if bfly > 0 else "pay belly",
+                            "Full Tenor": f"{col} {t_s}-{col} {t_b}-{col} {t_l}",
                         }
                     )
 
             bfly_df = pd.DataFrame(bfly_records)
+            if exclude_tenors:
+                for col, tenors_to_exclude in exclude_tenors.items():
+                    if col in bfly_df.columns:
+                        bfly_df = bfly_df[~bfly_df[col].isin(tenors_to_exclude)]
+
+            if exclusive_tenors:
+                for col, exclusive_tenors in exclusive_tenors.items():
+                    if col in bfly_df.columns:
+                        bfly_df = bfly_df[bfly_df[col].isin(exclusive_tenors)]
+
             top_bfly_df = bfly_df.sort_values("ZScore-Spread", ascending=False, key=lambda x: np.abs(x)).head(top_n).reset_index(drop=True)
 
             return {"curve": top_curve_df, "fly": top_bfly_df}
@@ -997,148 +1172,208 @@ class S490Swaps:
     def backtester():
         pass
 
+    @staticmethod
+    def timeseries_builder(
+        fwd_dict_df: Dict[datetime, pd.DataFrame],
+        cols: List[str],
+        bdates: Optional[List[pd.Timestamp] | List[datetime]] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        tqdm_desc: Optional[str] = "BUILDING OIS SWAP TIMESERIES DF...",
+        tenor_is_df_index: Optional[bool] = False,
+        scale_curve: Optional[bool] = False,
+        scale_fly: Optional[bool] = False,
+        fifty_fifty_fly: Optional[bool] = False,
+        custom_fly_weights: Optional[Annotated[List[float], 3]] = None,
+    ) -> pd.DataFrame:
+        if bdates is None and not start_date and not end_date:
+            raise ValueError("Must specifiy 'bdates' or 'start_date' and 'end_date'")
 
-def _general_fwd_dict_df_timeseries_plotter(
-    fwd_dict_df: Dict[datetime, pd.DataFrame],
-    tenors_to_plot: List[str],
-    bdates: List[pd.Timestamp] | List[datetime],
-    tqdm_desc: str,
-    custom_title: Optional[str] = None,
-    yaxis_title: Optional[str] = None,
-    use_plotly: Optional[bool] = False,
-    tenor_is_df_index: Optional[bool] = False,
-    should_scale_spreads: Optional[bool] = False,
-):
-    dates = []
-    to_plot: Dict[str, List[float]] = {}
-    for bdate in tqdm.tqdm(bdates, desc=tqdm_desc):
-        if not type(bdate) is datetime:
-            bdate: pd.Timestamp = bdate
-            bdate = bdate.to_pydatetime()
+        if bdates is None:
+            bdates = pd.date_range(start=start_date, end=end_date, freq=CustomBusinessDay(calendar=USFederalHolidayCalendar()))
 
-        try:
-            curr_df = fwd_dict_df[bdate]
-            if tenor_is_df_index:
-                curr_df = curr_df.copy()
-                curr_df = curr_df.reset_index()
-            dates.append(bdate)
+        dates = []
+        to_plot: Dict[str, List[float]] = {}
+        for bdate in tqdm.tqdm(bdates, desc=tqdm_desc):
+            if not type(bdate) is datetime:
+                bdate: pd.Timestamp = bdate
+                bdate = bdate.to_pydatetime()
 
+            try:
+                curr_df = fwd_dict_df[bdate]
+                if tenor_is_df_index:
+                    curr_df = curr_df.copy()
+                    curr_df = curr_df.reset_index()
+                dates.append(bdate)
+
+                for tenor in cols:
+                    # spread case
+                    if "-" in tenor:
+                        legs = tenor.split("-")
+
+                        # curve case
+                        if len(legs) == 2:
+                            leg1, leg2 = legs
+                            if tenor not in to_plot:
+                                to_plot[tenor] = []
+
+                            group1 = leg1.split(" ")
+                            group2 = leg2.split(" ")
+                            if len(group1) == 3 and len(group2) == 3:
+                                implied_fwd1 = " ".join(group1[:2])
+                                leg1 = " ".join(group1[2:])
+                                implied_fwd2 = " ".join(group2[:2])
+                                leg2 = " ".join(group2[2:])
+                            else:
+                                implied_fwd1 = "Spot"
+                                implied_fwd2 = "Spot"
+
+                            spread = (
+                                curr_df.loc[curr_df["Tenor"] == leg2, implied_fwd2].values[0]
+                                - curr_df.loc[curr_df["Tenor"] == leg1, implied_fwd1].values[0]
+                            )
+                            if scale_curve:
+                                spread = spread * 100
+
+                            to_plot[tenor].append(spread)
+
+                        # butterfly case
+                        elif len(legs) == 3:
+                            leg1, leg2, leg3 = legs
+                            if tenor not in to_plot:
+                                to_plot[tenor] = []
+
+                            group1 = leg1.split(" ")
+                            group2 = leg2.split(" ")
+                            group3 = leg3.split(" ")
+                            if len(group1) == 3 and len(group2) == 3:
+                                implied_fwd1 = " ".join(group1[:2])
+                                leg1 = " ".join(group1[2:])
+                                implied_fwd2 = " ".join(group2[:2])
+                                leg2 = " ".join(group2[2:])
+                                implied_fwd3 = " ".join(group3[:2])
+                                leg3 = " ".join(group3[2:])
+                            else:
+                                implied_fwd1 = "Spot"
+                                implied_fwd2 = "Spot"
+                                implied_fwd3 = "Spot"
+
+                            if fifty_fifty_fly:
+                                spread = (
+                                    (1 * curr_df.loc[curr_df["Tenor"] == leg2, implied_fwd2].values[0])
+                                    - (0.5 * curr_df.loc[curr_df["Tenor"] == leg1, implied_fwd1].values[0])
+                                    - (0.5 * curr_df.loc[curr_df["Tenor"] == leg3, implied_fwd3].values[0])
+                                )
+                            elif custom_fly_weights:
+                                spread = (
+                                    (custom_fly_weights[1] * curr_df.loc[curr_df["Tenor"] == leg2, implied_fwd2].values[0])
+                                    - (custom_fly_weights[0] * curr_df.loc[curr_df["Tenor"] == leg1, implied_fwd1].values[0])
+                                    - (custom_fly_weights[2] * curr_df.loc[curr_df["Tenor"] == leg3, implied_fwd3].values[0])
+                                )
+                            else:
+                                spread = (
+                                    curr_df.loc[curr_df["Tenor"] == leg2, implied_fwd2].values[0]
+                                    - curr_df.loc[curr_df["Tenor"] == leg1, implied_fwd1].values[0]
+                                ) - (
+                                    curr_df.loc[curr_df["Tenor"] == leg3, implied_fwd3].values[0]
+                                    - curr_df.loc[curr_df["Tenor"] == leg2, implied_fwd2].values[0]
+                                )
+                            if scale_fly:
+                                spread = spread * 100
+
+                            to_plot[tenor].append(spread)
+
+                        # bad format
+                        else:
+                            raise ValueError("Bad format passed in")
+                    else:
+                        groups = tenor.split(" ")
+                        if len(groups) == 3:
+                            fwd_tenor = tenor
+                            if fwd_tenor not in to_plot:
+                                to_plot[fwd_tenor] = []
+                            to_plot[fwd_tenor].append(curr_df.loc[curr_df["Tenor"] == " ".join(groups[2:]), " ".join(groups[:2])].values[0])
+                        else:
+                            if tenor not in to_plot:
+                                to_plot[tenor] = []
+                            to_plot[tenor].append(curr_df.loc[curr_df["Tenor"] == tenor, "Spot"].values[0])
+
+            except Exception as e:
+                S490Swaps._logger.error(f"{tqdm_desc} Timeseries builder had an error at {bdate}: {e}")
+
+        timeseries_dict = {"Date": dates}
+        timeseries_dict = timeseries_dict | to_plot
+        return pd.DataFrame(timeseries_dict)
+
+    @staticmethod
+    def _general_fwd_dict_df_timeseries_plotter(
+        fwd_dict_df: Dict[datetime, pd.DataFrame],
+        tenors_to_plot: List[str],
+        bdates: List[pd.Timestamp] | List[datetime],
+        tqdm_desc: str,
+        custom_title: Optional[str] = None,
+        yaxis_title: Optional[str] = None,
+        use_plotly: Optional[bool] = False,
+        tenor_is_df_index: Optional[bool] = False,
+        custom_fly_weights: Optional[Annotated[List[float], 3]] = None,
+    ):
+        df = S490Swaps.timeseries_builder(
+            fwd_dict_df=fwd_dict_df,
+            cols=tenors_to_plot,
+            bdates=bdates,
+            tqdm_desc=tqdm_desc,
+            tenor_is_df_index=tenor_is_df_index,
+            scale_curve=True,
+            scale_fly=True,
+            custom_fly_weights=custom_fly_weights,
+        )
+
+        if use_plotly:
+            fig = go.Figure()
             for tenor in tenors_to_plot:
-                if "-" in tenor:
-                    legs = tenor.split("-")
-                    if len(legs) == 2:
-                        leg1, leg2 = legs
-                        if tenor not in to_plot:
-                            to_plot[tenor] = []
-
-                        group1 = leg1.split(" ")
-                        group2 = leg2.split(" ")
-                        if len(group1) == 3 and len(group2) == 3:
-                            implied_fwd1 = " ".join(group1[:2])
-                            leg1 = " ".join(group1[2:])
-                            implied_fwd2 = " ".join(group2[:2])
-                            leg2 = " ".join(group2[2:])
-                        else:
-                            implied_fwd1 = "Spot"
-                            implied_fwd2 = "Spot"
-
-                        spread = (
-                            curr_df.loc[curr_df["Tenor"] == leg2, implied_fwd2].values[0]
-                            - curr_df.loc[curr_df["Tenor"] == leg1, implied_fwd1].values[0]
-                        )
-                        if should_scale_spreads:
-                            spread = spread * 100
-                        to_plot[tenor].append(spread)
-                    elif len(legs) == 3:
-                        leg1, leg2, leg3 = legs
-                        if tenor not in to_plot:
-                            to_plot[tenor] = []
-
-                        group1 = leg1.split(" ")
-                        group2 = leg2.split(" ")
-                        group3 = leg3.split(" ")
-                        if len(group1) == 3 and len(group2) == 3:
-                            implied_fwd1 = " ".join(group1[:2])
-                            leg1 = " ".join(group1[2:])
-                            implied_fwd2 = " ".join(group2[:2])
-                            leg2 = " ".join(group2[2:])
-                            implied_fwd3 = " ".join(group3[:2])
-                            leg3 = " ".join(group3[2:])
-                        else:
-                            implied_fwd1 = "Spot"
-                            implied_fwd2 = "Spot"
-                            implied_fwd3 = "Spot"
-
-                        spread = (
-                            curr_df.loc[curr_df["Tenor"] == leg2, implied_fwd2].values[0]
-                            - curr_df.loc[curr_df["Tenor"] == leg1, implied_fwd1].values[0]
-                            - curr_df.loc[curr_df["Tenor"] == leg3, implied_fwd3].values[0]
-                            - curr_df.loc[curr_df["Tenor"] == leg2, implied_fwd2].values[0]
-                        )
-                        to_plot[tenor].append(spread)
-                    else:
-                        raise ValueError("Bad tenor passed in")
-                else:
-                    groups = tenor.split(" ")
-                    if len(groups) == 3:
-                        fwd_tenor = tenor
-                        if fwd_tenor not in to_plot:
-                            to_plot[fwd_tenor] = []
-                        to_plot[fwd_tenor].append(curr_df.loc[curr_df["Tenor"] == " ".join(groups[2:]), " ".join(groups[:2])].values[0])
-                    else:
-                        if tenor not in to_plot:
-                            to_plot[tenor] = []
-                        to_plot[tenor].append(curr_df.loc[curr_df["Tenor"] == tenor, "Spot"].values[0])
-
-        except Exception as e:
-            S490Swaps._logger.error(f"{tqdm_desc} Timeseries plotter had an error at {bdate}: {e}")
-
-    if use_plotly:
-        fig = go.Figure()
-        for tenor, rates in to_plot.items():
-            fig.add_trace(go.Scatter(x=dates, y=rates, mode="lines", name=tenor))
-        fig.update_layout(
-            title=custom_title or "SOFR OIS Plot",
-            xaxis_title="Date",
-            yaxis_title=yaxis_title or "bps",
-            legend_title="Tenors",
-            font=dict(size=11),
-            template="plotly_dark",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            height=750,
-        )
-        fig.update_xaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikemode="across", showgrid=True)
-        fig.update_yaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikethickness=0.5, showgrid=True)
-        fig.show(
-            config={
-                "modeBarButtonsToAdd": [
-                    "drawline",
-                    "drawopenpath",
-                    "drawclosedpath",
-                    "drawcircle",
-                    "drawrect",
-                    "eraseshape",
-                ]
-            }
-        )
-    else:
-        for tenor, rates in to_plot.items():
-            plt.plot(
-                dates,
-                rates,
-                label=tenor,
+                fig.add_trace(go.Scatter(x=df["Date"], y=df[tenor], mode="lines", name=tenor))
+            fig.update_layout(
+                title=custom_title or "SOFR OIS Plot",
+                xaxis_title="Date",
+                yaxis_title=yaxis_title or "bps",
+                legend_title="Tenors",
+                font=dict(size=11),
+                template="plotly_dark",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                height=750,
             )
+            fig.update_xaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikemode="across", showgrid=True)
+            fig.update_yaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikethickness=0.5, showgrid=True)
+            fig.show(
+                config={
+                    "modeBarButtonsToAdd": [
+                        "drawline",
+                        "drawopenpath",
+                        "drawclosedpath",
+                        "drawcircle",
+                        "drawrect",
+                        "eraseshape",
+                    ]
+                }
+            )
+        else:
+            for tenor in tenors_to_plot:
+                plt.plot(
+                    df["Date"],
+                    df[tenor],
+                    label=tenor,
+                )
 
-        ax = plt.gca()
-        locator = mdates.AutoDateLocator(minticks=10, maxticks=20)
-        formatter = mdates.DateFormatter("%Y-%m-%d")
-        ax.xaxis.set_major_locator(locator)
-        ax.xaxis.set_major_formatter(formatter)
+            ax = plt.gca()
+            locator = mdates.AutoDateLocator(minticks=10, maxticks=20)
+            formatter = mdates.DateFormatter("%Y-%m-%d")
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(formatter)
 
-        plt.xlabel("Date")
-        plt.ylabel(yaxis_title or "bps")
-        plt.title(custom_title or "SOFR OIS Plot")
-        plt.legend(fontsize="large")
-        plt.grid(True)
-        plt.xticks(rotation=15)
-        plt.show()
+            plt.xlabel("Date")
+            plt.ylabel(yaxis_title or "bps")
+            plt.title(custom_title or "SOFR OIS Plot")
+            plt.legend(fontsize="large")
+            plt.grid(True)
+            plt.xticks(rotation=15)
+            plt.show()

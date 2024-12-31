@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Annotated
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -43,7 +43,7 @@ def run_basic_linear_regression(
     slope = results.params[1]
     r_squared = results.rsquared
 
-    plt.figure(figsize=(12, 6))
+    plt.figure()
     plt.scatter(x_series, y_series)
 
     regression_line = intercept + slope * x_series
@@ -156,7 +156,7 @@ def run_basic_linear_regression_df(
         se_intercept = results.bse[0]
         se_slope = results.bse[1]
 
-    plt.figure(figsize=(15, 10))
+    plt.figure()
 
     if date_color_bar:
         df["date_numeric"] = (df["Date"] - df["Date"].min()).dt.total_seconds()
@@ -185,7 +185,7 @@ def run_basic_linear_regression_df(
     plt.ylabel(y_col if not on_diff else f"Δ{y_col}")
     plt.title(
         title or f"{regression_type} - {y_col} Regressed on {x_col}" if not on_diff else f"{regression_type} - Δ{y_col} Regressed on Δ{x_col}",
-        fontdict={"fontsize": "x-large"},
+        fontdict={"fontsize": "large"},
     )
     equation_text = (
         f"y = {intercept:.3f} + {slope:.3f}*{slope_name}\n"
@@ -194,7 +194,7 @@ def run_basic_linear_regression_df(
         f"p-value ({slope_name}) = {p_value:.3e}"
     )
     plt.plot([], [], " ", label=f"{equation_text}")
-    plt.legend(fontsize="x-large")
+    plt.legend(fontsize="large")
     plt.grid(True)
     plt.show()
 
@@ -206,8 +206,10 @@ def run_multiple_linear_regression_df(
     x_cols: List[str],
     y_col: str,
     title: Optional[str] = None,
-    verbose=False,
+    verbose: Optional[bool] = False,
     on_diff: Optional[bool] = False,
+    use_adjusted_residuals: bool = False,
+    show_plot: Optional[bool] = False,
 ):
     df = df[["Date"] + x_cols + [y_col]].copy()
     if on_diff:
@@ -215,9 +217,6 @@ def run_multiple_linear_regression_df(
         df = df[x_cols + [y_col]].diff()
         df["Date"] = date_col
     df = df.dropna()
-
-    if verbose:
-        print(df)
 
     for col in x_cols + [y_col]:
         if col not in df.columns:
@@ -229,7 +228,8 @@ def run_multiple_linear_regression_df(
 
     model = sm.OLS(Y, X)
     results = model.fit()
-    print(results.summary())
+    if verbose:
+        print(results.summary())
 
     intercept = results.params["const"]
     slopes = results.params.drop("const")
@@ -239,31 +239,41 @@ def run_multiple_linear_regression_df(
     Y_pred = results.fittedvalues
     residuals = results.resid
 
-    plt.figure(figsize=(20, 10))
-    plt.scatter(Y_pred, Y)
-    plt.xlabel("Predicted Values")
-    plt.ylabel("Actual Values")
-    plt.title("Actual vs Predicted")
-    plt.grid(True)
+    if use_adjusted_residuals:
+        df["adjusted_residuals"] = residuals
+        for col in x_cols:
+            X_adjusted = X.drop(columns=col)
+            model_adjusted = sm.OLS(Y, X_adjusted).fit()
+            residuals_adjusted = Y - model_adjusted.fittedvalues
+            df[f"adjusted_residuals_{col}"] = residuals_adjusted
 
-    equation_text = f"y = {intercept:.3f}"
-    for col in slopes.index:
-        coef = slopes[col]
-        equation_text += f" + {coef:.3f}*{col}"
-    equation_text += f"\nR² = {r_squared:.3f}\nAdjusted R² = {adj_r_squared:.3f}"
-    plt.plot([], [], " ", label=equation_text)
-    plt.legend(fontsize="x-large")
-    plt.show()
+        return df[["Date"] + [f"adjusted_residuals_{col}" for col in x_cols]], results
 
-    # Plot Residuals vs Predicted
-    plt.figure(figsize=(20, 10))
-    plt.scatter(Y_pred, residuals)
-    plt.axhline(y=0, color="red", linestyle="--")
-    plt.xlabel("Predicted Values")
-    plt.ylabel("Residuals")
-    plt.title(title or "Residuals vs Predicted")
-    plt.grid(True)
-    plt.show()
+    if show_plot:
+        plt.figure()
+        plt.scatter(Y_pred, Y)
+        plt.xlabel("Predicted Values")
+        plt.ylabel("Actual Values")
+        plt.title("Actual vs Predicted")
+        plt.grid(True)
+
+        equation_text = f"y = {intercept:.3f}"
+        for col in slopes.index:
+            coef = slopes[col]
+            equation_text += f" + {coef:.3f}*{col}"
+        equation_text += f"\nR² = {r_squared:.3f}\nAdjusted R² = {adj_r_squared:.3f}"
+        plt.plot([], [], " ", label=equation_text)
+        plt.legend(fontsize="large")
+        plt.show()
+
+        plt.figure()
+        plt.scatter(Y_pred, residuals)
+        plt.axhline(y=0, color="red", linestyle="--")
+        plt.xlabel("Predicted Values")
+        plt.ylabel("Residuals")
+        plt.title(title or "Residuals vs Predicted")
+        plt.grid(True)
+        plt.show()
 
     return df, results
 
@@ -278,7 +288,8 @@ def plot_residuals_timeseries(
     rolling_stds: Optional[List[Tuple[int, int]]] = None,
 ):
     residuals = results.resid
-    zscores = zscore(residuals)
+    if plot_zscores:
+        residuals = zscore(residuals)
 
     if date_col not in df.columns:
         raise Exception(f"{date_col} not in df columns")
@@ -300,35 +311,147 @@ def plot_residuals_timeseries(
     else:
         title = f"Residuals of {dependent_variable} Regressed on {independent_variables} Over Time\n"
 
-    plt.figure(figsize=(20, 10))
-    plt.plot(df[date_col], residuals if not plot_zscores else zscores, linestyle="-", color="blue")
+    plt.figure()
+    plt.plot(df[date_col], residuals, linestyle="-", color="blue")
     plt.axhline(y=0, color="red", linestyle="--")
     equation_text = f"y = {intercept:.3f} + {slope:.3f}*{slope_name}\nR² = {r_squared:.3f}\nSE = {results.bse["const"]:.3f}"
-    for var in results.params.drop("const").index:
-        p_val = results.pvalues[var]
-        equation_text += f"\np-value ({var}) = {p_val:.3e}"
+    # for var in results.params.drop("const").index:
+    #     p_val = results.pvalues[var]
+    #     equation_text += f"\np-value ({var}) = {p_val:.3e}"
     plt.plot([], [], " ", label=f"{equation_text}")
+    plt.plot(
+        [],
+        [],
+        " ",
+        label=f"Most Recent Residual ({df['Date'].iloc[-1].date()}): {residuals.iloc[-1]:.2f}",
+    )
 
     if stds:
         resid_std = tstd(residuals)
         resid_mean = np.mean(residuals)
         plt.axhline(resid_mean, linestyle="--", color="red", label=f"Resid Mean: {resid_mean}")
         for std in stds:
-            curr = plt.axhline(resid_mean + resid_std * std, linestyle="--", label=f"+/- {std} STD")
-            plt.axhline(resid_mean + resid_std * -1 * std, linestyle="--", color=curr.get_color())
+            curr_std_level = resid_mean + resid_std * std
+            curr = plt.axhline(curr_std_level, linestyle="--", label=f"+/- {std} STD Resid Level: {np.round(curr_std_level, 3)}")
+            plt.axhline(curr_std_level * -1, linestyle="--", color=curr.get_color())
 
-    if rolling_stds:
-        for std, window in rolling_stds:
-            rolling_resid_std = pd.Series(residuals).rolling(window).std()
-            curr = plt.plot(df[date_col], rolling_resid_std * std, linestyle="--", label=f"+/- {std} {window}d Rolling STD")
-            plt.plot(df[date_col], -rolling_resid_std * std, linestyle="--", color=curr[0].get_color())
-
-    plt.legend(fontsize="x-large")
+    plt.legend(fontsize="large")
     plt.xlabel("Date")
-    plt.ylabel("Residuals" if not plot_zscores else "Z-Scores")
-    plt.title(title + ", Z-Scroes" if plot_zscores else title, fontdict={"fontsize": "x-large"})
+    plt.ylabel("Residuals (bps)" if not plot_zscores else "Z-Scores")
+    plt.title(title + ", Z-Scroes" if plot_zscores else title, fontdict={"fontsize": "large"})
     plt.grid(True)
     plt.show()
+
+
+def modified_partial_regression_fly_plot(
+    df: pd.DataFrame,
+    x_cols: Annotated[List[str], 2],
+    y_col: str,
+    show_regression: Optional[bool] = False,
+    show_residuals: Optional[bool] = False,
+    show_residual_timeseries: Optional[bool] = False,
+    plot_zscores: Optional[bool] = False,
+    stds: Optional[List[int]] = None,
+    verbose: Optional[bool] = False,
+):
+    X1 = sm.add_constant(df[x_cols[1]])
+    model1 = sm.OLS(df[y_col], X1).fit()
+    df[f"{y_col}_resid"] = model1.resid
+
+    X2 = sm.add_constant(df[x_cols[0]])
+    model2 = sm.OLS(df[f"{y_col}_resid"], X2).fit()
+    df["partial_residuals"] = model2.fittedvalues
+
+    if verbose:
+        print(model2.summary())
+
+    intercept = model2.params["const"]
+    r_squared = model2.rsquared
+    intercept = model2.params[0]
+    slope = model2.params[1]
+    p_value = model2.pvalues[1] if len(model2.pvalues) > 1 else None
+    dependent_variable = model2.model.endog_names
+    independent_variables = model2.model.exog_names[1]
+    slope_name = model2.params.drop("const").index[0]
+
+    if p_value is not None:
+        title = f"Residuals of {dependent_variable} Regressed on {independent_variables} Over Time\n"
+    else:
+        title = f"Residuals of {dependent_variable} Regressed on {independent_variables} Over Time\n"
+
+    # equation_text = f"y_adj_{y_col} = {coeff_xcol_0:.2f} x {x_cols[0]} {intercept:+.2f}"
+    equation_text = f"y = {intercept:.3f} + {slope:.3f}*{slope_name}\nR² = {r_squared:.3f}\nSE = {model2.bse["const"]:.3f}"
+    # for var in model2.params.drop("const").index:
+    #     p_val = model2.pvalues[var]
+    #     equation_text += f"\np-value ({var}) = {p_val:.3e}"
+
+    if show_regression:
+        plt.figure()
+        plt.scatter(df[x_cols[0]], df[f"{y_col}_resid"], alpha=0.7)
+        plt.plot([], [], " ", label=equation_text)
+        plt.scatter(
+            df[f"{x_cols[0]}"].iloc[-1], df[f"{y_col}_resid"].iloc[-1], label=f"Most Recent Obs: {df["Date"].iloc[-1].date()}", color="green", s=50
+        )
+        plt.plot(df[x_cols[0]], df["partial_residuals"], color="blue", linestyle="-")
+
+        plt.title(f"Partial Regression: {title} (After Adjusting for {x_cols[1]})")
+        plt.xlabel(f"{x_cols[0]}")
+        plt.ylabel(f"Adjusted {y_col} Fly")
+        plt.legend(fontsize="large")
+        plt.grid(True)
+        plt.show()
+
+    if show_residuals:
+        plt.figure()
+        residuals = df[f"{y_col}_resid"] - df["partial_residuals"]
+        plt.plot([], [], " ", label=equation_text)
+        plt.scatter(df[x_cols[0]], residuals, alpha=0.7, color="red")
+        plt.scatter(
+            df[x_cols[0]].iloc[-1],
+            residuals.iloc[-1],
+            color="green",
+            label=f"Most Recent Resid ({df['Date'].iloc[-1].date()}): {residuals.iloc[-1]:.2f}",
+            s=100,
+        )
+        plt.axhline(0, color="black", linestyle="--")
+        plt.title(f"Partial Regression: Residuals of {y_col} Fly vs {x_cols[0]} (After Adjusting for {x_cols[1]})")
+        plt.xlabel(f"{x_cols[0]}")
+        plt.ylabel("Residuals (bps)")
+        plt.legend(fontsize="large")
+        plt.grid(True)
+        plt.show()
+
+    if show_residual_timeseries:
+        plt.figure()
+        residuals = df[f"{y_col}_resid"] - df["partial_residuals"]
+        if plot_zscores:
+            residuals = zscore(residuals)
+
+        plt.plot(df["Date"], residuals, linestyle="-", color="blue")
+        plt.axhline(0, color="red", linestyle="--")
+        plt.plot([], [], " ", label=equation_text)
+        plt.plot(
+            [],
+            [],
+            " ",
+            label=f"Most Recent Resid ({df['Date'].iloc[-1].date()}): {residuals.iloc[-1]:.2f}",
+        )
+
+        if stds:
+            resid_std = tstd(residuals)
+            resid_mean = np.mean(residuals)
+            plt.axhline(resid_mean, linestyle="--", color="red", label=f"Resid Mean: {resid_mean}")
+            for std in stds:
+                curr_std_level = resid_mean + resid_std * std
+                curr = plt.axhline(curr_std_level, linestyle="--", label=f"+/- {std} STD Resid Level: {np.round(curr_std_level, 3)}")
+                plt.axhline(curr_std_level * -1, linestyle="--", color=curr.get_color())
+
+        plt.title(f"Partial Regression: Residuals of {y_col} Fly vs {x_cols[0]} (After Adjusting for {x_cols[1]})")
+        plt.xlabel("Date")
+        plt.ylabel("Residuals (bps)" if not plot_zscores else "Z-Scores")
+        plt.legend(fontsize="large")
+        plt.grid(True)
+        plt.show()
 
 
 def run_rolling_regression_df(df: pd.DataFrame, x_col: str, y_col: str, window: int, title: Optional[str] = None):
@@ -354,7 +477,7 @@ def run_rolling_regression_df(df: pd.DataFrame, x_col: str, y_col: str, window: 
             r_squared = calculate_r_squared(rolling_df[x_col], rolling_df[y_col])
             rolling_r_squared.append(r_squared)
 
-    plt.figure(figsize=(20, 10))
+    plt.figure()
     plt.plot(df["Date"], rolling_r_squared, label=f"Rolling R-squared (window={window})")
 
     most_recent = df["Date"].iloc[-1]
@@ -382,6 +505,8 @@ https://docs.scipy.org/doc/scipy/reference/odr.html
 https://www.mechanicalkern.com/static/odr_ams.pdf
 https://www.reddit.com/r/mathematics/comments/12qkes4/confused_btw_orthogonal_linear_regressionolr/
 """
+
+
 def run_odr(df: pd.DataFrame, x_cols: List[str], y_col: str, x_errs: Optional[npt.ArrayLike] = None, y_errs: Optional[npt.ArrayLike] = None):
     def orthoregress(
         x: pd.Series | npt.ArrayLike, y: pd.Series | npt.ArrayLike, x_errs: Optional[npt.ArrayLike] = None, y_errs: Optional[npt.ArrayLike] = None
