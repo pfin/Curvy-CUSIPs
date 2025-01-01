@@ -225,6 +225,12 @@ $$
 That yields the hedge ratios $n_2$ and $n_{10}$ (for a chosen $n_5$) such that the overall 2y–5y–10y position has zero exposure to the first two principal components.
 
 
+### [swaps_rv.ipynb](https://github.com/yieldcurvemonkey/Curvy-CUSIPs/blob/main/notebooks/swaps_rv.ipynb)
+
+- Using PCA and different regressions to find RV in swap spaces
+
+![womp womp](./dump/output.png)
+
 ### [sabr_smile.ipynb](https://github.com/yieldcurvemonkey/Curvy-CUSIPs/blob/main/notebooks/sabr_smile.ipynb)
 
 ![til](./dump/sabrsmileexample.gif)

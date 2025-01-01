@@ -1,10 +1,11 @@
 import itertools
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Literal, Optional, Tuple, Annotated
 
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import random
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -14,12 +15,13 @@ import tqdm
 from tqdm_joblib import tqdm_joblib
 from pandas.tseries.holiday import USFederalHolidayCalendar
 from pandas.tseries.offsets import BDay, CustomBusinessDay
-from scipy.stats import zscore
+from scipy.stats import zscore, tstd, norm
 from sklearn.decomposition import PCA
 from termcolor import colored
 
 from CurvyCUSIPs.utils.dtcc_swaps_utils import DEFAULT_SWAP_TENORS, datetime_to_ql_date, tenor_to_years
 from CurvyCUSIPs.utils.ShelveDBWrapper import ShelveDBWrapper
+from CurvyCUSIPs.utils.mean_reversion import simulate_mean_reversion_ou
 
 
 class S490Swaps:
@@ -225,7 +227,7 @@ class S490Swaps:
                         x=[tenor_to_years(tenor) for tenor in fwd_grid_dict[dt]["Tenor"].to_list()],
                         y=fwd_grid_dict[dt][tenor],
                         mode="lines",
-                        name=tenor,
+                        name=f"{dt.date()} - {tenor}",
                     )
                 )
             fig.update_layout(
@@ -245,7 +247,7 @@ class S490Swaps:
                 plt.plot(
                     [tenor_to_years(tenor) for tenor in fwd_grid_dict[dt]["Tenor"].to_list()],
                     fwd_grid_dict[dt][tenor],
-                    label=tenor,
+                    label=f"{dt.date()} - {tenor}",
                 )
 
             plt.xlabel("Tenor")
@@ -260,6 +262,7 @@ class S490Swaps:
         fwd_grid_dict: Dict[datetime, pd.DataFrame],
         tenors_to_plot: List[str],
         bdates: List[pd.Timestamp],
+        tenors_to_plot_on_secondary_axis: Optional[List[str]] = None,
         custom_title: Optional[str] = None,
         use_plotly: Optional[bool] = False,
         custom_fly_weights: Optional[Annotated[List[float], 3]] = None,
@@ -267,6 +270,7 @@ class S490Swaps:
         S490Swaps._general_fwd_dict_df_timeseries_plotter(
             fwd_dict_df=fwd_grid_dict,
             tenors_to_plot=tenors_to_plot,
+            tenors_to_plot_on_secondary_axis=tenors_to_plot_on_secondary_axis,
             bdates=bdates,
             tqdm_desc="PLOTTING SWAPS",
             custom_title=custom_title,
@@ -711,8 +715,9 @@ class S490Swaps:
         # non-rolling pca case
         else:
 
-            # non-rolling pca on indy fwd strips 
+            # non-rolling pca on indy fwd strips
             if indy_fwd_strips:
+
                 def _pca_for_one_fwd_type(fwd_type: str):
                     sub_df = long_df.xs(fwd_type, axis=1, level="FwdType")
 
@@ -911,6 +916,7 @@ class S490Swaps:
             tenor_is_df_index=True,
             use_plotly=use_plotly,
             custom_fly_weights=custom_fly_weights,
+            should_scale=False,
         )
 
     @staticmethod
@@ -1067,6 +1073,7 @@ class S490Swaps:
                         "Tenor2": f"{fwd2}x{tenor2}",
                         "ZScore-Spread": spread,
                         "Trade": "steepener" if spread > 0 else "flattener",
+                        "Full Tenor": f"{fwd1} {tenor1}-{fwd2} {tenor2}",
                     }
                 )
 
@@ -1088,7 +1095,7 @@ class S490Swaps:
                         "ShortWing": f"{fwd1}x{tenor1}",
                         "Belly": f"{fwd2}x{tenor2}",
                         "LongWing": f"{fwd3}x{tenor3}",
-                        "Full Tenor": f"{fwd1}x{tenor1}-{fwd2}x{tenor2}-{fwd3}x{tenor3}",
+                        "Full Tenor": f"{fwd1} {tenor1}-{fwd2} {tenor2}-{fwd3} {tenor3}",
                         "ZScore-Spread": bfly,
                         "Trade": "rec belly" if bfly > 0 else "pay belly",
                     }
@@ -1124,6 +1131,7 @@ class S490Swaps:
                             "Tenor2": t2,
                             "ZScore-Spread": spread,
                             "Trade": "steepener" if spread > 0 else "flattener",
+                            "Full Tenor": f"{col} {t1}-{col} {t2}",
                         }
                     )
 
@@ -1311,37 +1319,76 @@ class S490Swaps:
         tenors_to_plot: List[str],
         bdates: List[pd.Timestamp] | List[datetime],
         tqdm_desc: str,
+        tenors_to_plot_on_secondary_axis: Optional[List[str]] = None,
         custom_title: Optional[str] = None,
         yaxis_title: Optional[str] = None,
         use_plotly: Optional[bool] = False,
         tenor_is_df_index: Optional[bool] = False,
         custom_fly_weights: Optional[Annotated[List[float], 3]] = None,
+        should_scale: Optional[bool] = True,
     ):
         df = S490Swaps.timeseries_builder(
             fwd_dict_df=fwd_dict_df,
-            cols=tenors_to_plot,
+            cols=tenors_to_plot + tenors_to_plot_on_secondary_axis if tenors_to_plot_on_secondary_axis else tenors_to_plot,
             bdates=bdates,
             tqdm_desc=tqdm_desc,
             tenor_is_df_index=tenor_is_df_index,
-            scale_curve=True,
-            scale_fly=True,
+            scale_curve=should_scale,
+            scale_fly=should_scale,
             custom_fly_weights=custom_fly_weights,
         )
 
+        S490Swaps._general_df_plotter(
+            df=df,
+            cols_to_plot=tenors_to_plot,
+            cols_to_plot_raxis=tenors_to_plot_on_secondary_axis,
+            use_plotly=use_plotly,
+            custom_title=custom_title,
+            yaxis_title=yaxis_title,
+        )
+
+    @staticmethod
+    def _general_df_plotter(
+        df: pd.DataFrame,
+        cols_to_plot: List[str],
+        cols_to_plot_raxis: Optional[List[str]] = None,
+        use_plotly: Optional[bool] = False,
+        custom_title: Optional[str] = None,
+        yaxis_title: Optional[str] = None,
+        yaxis_title_r: Optional[str] = None,
+        stds: Optional[Dict[str, List[int]]] = {},
+        run_ou_mr_col_steps: Optional[Tuple[str, int]] = None,
+        fill_ou_bands: Optional[bool] = False,
+        show_1_sigma_ou_band: Optional[bool] = False,
+        show_2_sigma_ou_band: Optional[bool] = False,
+    ):
         if use_plotly:
             fig = go.Figure()
-            for tenor in tenors_to_plot:
-                fig.add_trace(go.Scatter(x=df["Date"], y=df[tenor], mode="lines", name=tenor))
+            for tenor in cols_to_plot:
+                fig.add_trace(go.Scatter(x=df["Date"], y=df[tenor], mode="lines", name=f"{tenor} (lhs)", yaxis="y1"))
+            if cols_to_plot_raxis:
+                for tenor in cols_to_plot_raxis:
+                    fig.add_trace(go.Scatter(x=df["Date"], y=df[tenor], mode="lines", name=f"{tenor} (rhs)", yaxis="y2"))
+
             fig.update_layout(
-                title=custom_title or "SOFR OIS Plot",
+                title=(
+                    custom_title or f"{" ".join(cols_to_plot)} (lhs) & {" ".join(cols_to_plot_raxis)} (rhs) Timeseries"
+                    if cols_to_plot_raxis
+                    else f"{" ".join(cols_to_plot)} Timeseries"
+                ),
                 xaxis_title="Date",
-                yaxis_title=yaxis_title or "bps",
-                legend_title="Tenors",
-                font=dict(size=11),
+                yaxis=dict(title=yaxis_title if yaxis_title else ", ".join(cols_to_plot), side="left"),
+                yaxis2=dict(
+                    title=yaxis_title_r if yaxis_title_r else ", ".join(cols_to_plot_raxis) if cols_to_plot_raxis else None,
+                    overlaying="y",
+                    side="right",
+                ),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, title="Tenors"),
                 template="plotly_dark",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                font=dict(size=11),
                 height=750,
             )
+
             fig.update_xaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikemode="across", showgrid=True)
             fig.update_yaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikethickness=0.5, showgrid=True)
             fig.show(
@@ -1357,23 +1404,143 @@ class S490Swaps:
                 }
             )
         else:
-            for tenor in tenors_to_plot:
-                plt.plot(
+            unique_colors = plt.cm.tab10.colors
+            i = 0
+            fig, ax_left = plt.subplots()
+
+            lns = []
+            for tenor in cols_to_plot:
+                lns += ax_left.plot(
                     df["Date"],
                     df[tenor],
-                    label=tenor,
+                    label=f"{tenor} (lhs)\nMost Recent: {df["Date"].iloc[-1].date()}, {np.round(df[tenor].iloc[-1], 3)}",
+                    color=unique_colors[i],
                 )
+                i += 1
 
-            ax = plt.gca()
+                if tenor in stds.keys():
+                    level_std = tstd(df[tenor])
+                    level_mean = np.mean(df[tenor])
+                    lns += ax_left.plot(df["Date"], [level_mean] * len(df["Date"]), linestyle="--", color="red", label=f"Mean: {level_mean}")
+
+                    for std in stds[tenor]:
+                        curr_std_level = level_mean + (level_std * std)
+                        curr_std_level_opp = level_mean + (level_std * std * -1)
+                        curr = ax_left.plot(
+                            df["Date"],
+                            [curr_std_level] * len(df["Date"]),
+                            linestyle="--",
+                            label=f"± {std} STD: {np.round(curr_std_level, 3)}, {np.round(curr_std_level_opp, 3)}",
+                            color="red",
+                            alpha=0.75,
+                        )
+                        lns += curr
+                        ax_left.plot(df["Date"], [curr_std_level_opp] * len(df["Date"]), linestyle="--", color=curr[0].get_color(), alpha=0.75)
+
+            ax_left.set_ylabel(yaxis_title if yaxis_title else ", ".join(cols_to_plot))
+            ax_left.tick_params(axis="y")
+
+            if cols_to_plot_raxis:
+                ax_right = ax_left.twinx()
+                for tenor in cols_to_plot_raxis:
+                    lns += ax_right.plot(
+                        df["Date"],
+                        df[tenor],
+                        label=f"{tenor} (lhs)\nMost Recent: {df["Date"].iloc[-1].date()}, {np.round(df[tenor].iloc[-1], 3)}",
+                        color=unique_colors[i],
+                    )
+                    i += 1
+
+                    if tenor in stds.keys():
+                        level_std = tstd(df[tenor])
+                        level_mean = np.mean(df[tenor])
+                        lns += ax_right.plot(df["Date"], [level_mean] * len(df["Date"]), linestyle="--", color="red", label=f"Mean: {level_mean}")
+
+                        for std in stds[tenor]:
+                            curr_std_level = level_mean + (level_std * std)
+                            curr_std_level_opp = level_mean + (level_std * std * -1)
+                            curr = ax_right.plot(
+                                df["Date"],
+                                [curr_std_level] * len(df["Date"]),
+                                linestyle="--",
+                                label=f"±{std} std: {np.round(curr_std_level, 3)}, {np.round(curr_std_level_opp, 3)}",
+                                color="red",
+                                alpha=0.75,
+                            )
+                            lns += curr
+                            ax_right.plot(
+                                df["Date"],
+                                [curr_std_level_opp] * len(df["Date"]),
+                                linestyle="--",
+                                color=curr[0].get_color(),
+                                alpha=0.75,
+                            )
+
+                ax_right.set_ylabel(yaxis_title_r if yaxis_title_r else ", ".join(cols_to_plot_raxis))
+                ax_right.tick_params(axis="y")
+
+            if run_ou_mr_col_steps:
+                tenor_for_ou, time_steps = run_ou_mr_col_steps
+                if not tenor_for_ou in cols_to_plot:
+                    raise ValueError("OU Mean Reversion only supported for left axis plotting")
+
+                ts_ou = df.set_index("Date")[[tenor_for_ou]].dropna()
+                ou_forecast, optimal_holding_period = simulate_mean_reversion_ou(ts_ou, steps=time_steps)
+                lns += ax_left.plot(
+                    ou_forecast.index,
+                    ou_forecast["mean_reversion"],
+                    label=f"OU Mean Reversion (t+1), Optimal Holding Period: {np.ceil(optimal_holding_period)}d",
+                    color="green",
+                    linestyle="dashdot",
+                )
+                if fill_ou_bands:
+                    ax_left.fill_between(
+                        ou_forecast.index,
+                        ou_forecast["+2_sigma"],
+                        ou_forecast["-2_sigma"],
+                        color="tab:green",
+                        alpha=0.25,
+                        label=f"±2 sigma corridor ({tenor_for_ou})",
+                    )
+                else:
+                    if show_1_sigma_ou_band:
+                        curr = ax_left.plot(ou_forecast.index, ou_forecast["+1_sigma"], color="green", alpha=0.7, linestyle="dashdot")
+                        lns += curr
+                        ax_left.plot(
+                            ou_forecast.index,
+                            ou_forecast["-1_sigma"],
+                            label=f"OU Mean Reversion -1 Sigma",
+                            color=curr[0].get_color(),
+                            alpha=0.7,
+                            linestyle="dashdot",
+                        )
+
+                    if show_2_sigma_ou_band:
+                        curr = ax_left.plot(ou_forecast.index, ou_forecast["+2_sigma"], color="green", alpha=0.7, linestyle="dashdot")
+                        lns += curr
+                        ax_left.plot(
+                            ou_forecast.index,
+                            ou_forecast["-2_sigma"],
+                            label=f"OU Mean Reversion -2 Sigma",
+                            color=curr[0].get_color(),
+                            alpha=0.7,
+                            linestyle="dashdot",
+                        )
+
             locator = mdates.AutoDateLocator(minticks=10, maxticks=20)
             formatter = mdates.DateFormatter("%Y-%m-%d")
-            ax.xaxis.set_major_locator(locator)
-            ax.xaxis.set_major_formatter(formatter)
+            ax_left.xaxis.set_major_locator(locator)
+            ax_left.xaxis.set_major_formatter(formatter)
+            ax_left.set_xlabel("Date")
 
-            plt.xlabel("Date")
-            plt.ylabel(yaxis_title or "bps")
-            plt.title(custom_title or "SOFR OIS Plot")
-            plt.legend(fontsize="large")
-            plt.grid(True)
+            labs = [l.get_label() for l in lns]
+            ax_left.legend(lns, labs, loc=(0, 0))
+            plt.title(
+                custom_title or f"{' '.join(cols_to_plot)} (lhs) & {' '.join(cols_to_plot_raxis)} (rhs) Timeseries"
+                if cols_to_plot_raxis
+                else f"{' '.join(cols_to_plot)} Timeseries"
+            )
+            ax_left.grid(True)
             plt.xticks(rotation=15)
+            fig.tight_layout()
             plt.show()

@@ -180,7 +180,7 @@ def run_basic_linear_regression_df(
         )
 
     regression_line = intercept + slope * df[x_col]
-    plt.plot(df[x_col], regression_line, color="red")
+    plt.plot(df[x_col], regression_line, color="blue")
     plt.xlabel(x_col if not on_diff else f"Δ{x_col}")
     plt.ylabel(y_col if not on_diff else f"Δ{y_col}")
     plt.title(
@@ -285,7 +285,6 @@ def plot_residuals_timeseries(
     plot_zscores: Optional[bool] = False,
     stds: Optional[List[int]] = None,
     is_on_diff: Optional[bool] = False,
-    rolling_stds: Optional[List[Tuple[int, int]]] = None,
 ):
     residuals = results.resid
     if plot_zscores:
@@ -303,13 +302,13 @@ def plot_residuals_timeseries(
     slope = results.params[1]
     p_value = results.pvalues[1] if len(results.pvalues) > 1 else None
     dependent_variable = results.model.endog_names
-    independent_variables = results.model.exog_names[1]
+    independent_variables = results.model.exog_names[1:]
     slope_name = results.params.drop("const").index[0]
 
     if p_value is not None:
-        title = f"Residuals of {dependent_variable} Regressed on {independent_variables} Over Time\n"
+        title = f"Residuals of {dependent_variable} Regressed on {", ".join(independent_variables)} Over Time\n"
     else:
-        title = f"Residuals of {dependent_variable} Regressed on {independent_variables} Over Time\n"
+        title = f"Residuals of {dependent_variable} Regressed on {", ".join(independent_variables)} Over Time\n"
 
     plt.figure()
     plt.plot(df[date_col], residuals, linestyle="-", color="blue")
@@ -335,7 +334,7 @@ def plot_residuals_timeseries(
             curr = plt.axhline(curr_std_level, linestyle="--", label=f"+/- {std} STD Resid Level: {np.round(curr_std_level, 3)}")
             plt.axhline(curr_std_level * -1, linestyle="--", color=curr.get_color())
 
-    plt.legend(fontsize="large")
+    plt.legend(loc=(0, 0), fontsize="large")
     plt.xlabel("Date")
     plt.ylabel("Residuals (bps)" if not plot_zscores else "Z-Scores")
     plt.title(title + ", Z-Scroes" if plot_zscores else title, fontdict={"fontsize": "large"})
@@ -390,7 +389,11 @@ def modified_partial_regression_fly_plot(
         plt.scatter(df[x_cols[0]], df[f"{y_col}_resid"], alpha=0.7)
         plt.plot([], [], " ", label=equation_text)
         plt.scatter(
-            df[f"{x_cols[0]}"].iloc[-1], df[f"{y_col}_resid"].iloc[-1], label=f"Most Recent Obs: {df["Date"].iloc[-1].date()}", color="green", s=50
+            df[f"{x_cols[0]}"].iloc[-1],
+            df[f"{y_col}_resid"].iloc[-1],
+            label=f"Most Recent Observation: {df["Date"].iloc[-1].date()}",
+            color="orange",
+            s=100,
         )
         plt.plot(df[x_cols[0]], df["partial_residuals"], color="blue", linestyle="-")
 
@@ -449,7 +452,7 @@ def modified_partial_regression_fly_plot(
         plt.title(f"Partial Regression: Residuals of {y_col} Fly vs {x_cols[0]} (After Adjusting for {x_cols[1]})")
         plt.xlabel("Date")
         plt.ylabel("Residuals (bps)" if not plot_zscores else "Z-Scores")
-        plt.legend(fontsize="large")
+        plt.legend(loc=(0, 0), fontsize="large")
         plt.grid(True)
         plt.show()
 
