@@ -102,14 +102,15 @@ class ErisFuturesDataFetcher(DataFetcherBase):
         max_retries: Optional[int] = 3,
         backoff_factor: Optional[int] = 1,
     ):
-        month_offset = datetime.today().month - date.month
+        td = datetime.today() - date
         archives_path = f"archives/{date.year}/{date.month:02}-{calendar.month_name[date.month]}"
         file_name = f"Eris_{date.strftime("%Y%m%d")}_{workbook_type}.csv"
-        if month_offset < 3 and datetime.today().year == date.year:
+        if td.days < 90:
             eris_ftp_formatted_url = f"{self.eris_ftp_urls}/{file_name}"
         else:
             eris_ftp_formatted_url = f"{self.eris_ftp_urls}/{archives_path}/{file_name}"
 
+        print(eris_ftp_formatted_url)
         retries = 0
         try:
             ssl._create_default_https_context = ssl._create_unverified_context

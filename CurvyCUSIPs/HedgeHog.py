@@ -1,10 +1,12 @@
 import warnings
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
+import QuantLib as ql
 import scipy
 import statsmodels.api as sm
 import ujson as json
@@ -15,10 +17,11 @@ from termcolor import colored
 from CurvyCUSIPs.CurveBuilder import calc_ust_impl_spot_n_fwd_curve, calc_ust_metrics
 from CurvyCUSIPs.USTs import USTs
 from CurvyCUSIPs.utils.arbitragelab import EngleGrangerPortfolio, JohansenPortfolio, construct_spread
+from CurvyCUSIPs.utils.dtcc_swaps_utils import datetime_to_ql_date
 from CurvyCUSIPs.utils.regression_utils import run_odr
 
 
-def dv01_neutral_curve_hegde_ratio(
+def dv01_neutral_curve_hedge_ratio(
     as_of_date: datetime,
     front_leg_bond_row: Dict | pd.Series,
     back_leg_bond_row: Dict | pd.Series,
@@ -36,7 +39,7 @@ def dv01_neutral_curve_hegde_ratio(
 ):
     if total_trade_par_amount:
         raise ValueError("'total_trade_par_amount' is broken")
-    
+
     if isinstance(front_leg_bond_row, pd.Series) or isinstance(front_leg_bond_row, pd.DataFrame):
         front_leg_bond_row = front_leg_bond_row.to_dict("records")[0]
     if isinstance(back_leg_bond_row, pd.Series) or isinstance(back_leg_bond_row, pd.DataFrame):
@@ -83,7 +86,7 @@ def dv01_neutral_curve_hegde_ratio(
     hr = back_leg_metrics["bps"] / front_leg_metrics["bps"]
     print(colored(f"BPV Neutral Hedge Ratio: {hr}", "light_blue")) if verbose and not yvx_beta_adjustment else None
     if yvx_beta_adjustment:
-        title = custom_beta_weighted_title or "Beta Weighted Hedge Ratio" 
+        title = custom_beta_weighted_title or "Beta Weighted Hedge Ratio"
         (print(colored(f"{title}: {hr * yvx_beta_adjustment:3f}", "light_magenta")) if verbose else None)
         hr = hr * yvx_beta_adjustment
 
@@ -148,7 +151,7 @@ def dv01_neutral_curve_hegde_ratio(
 
 
 # reference point is buying the belly => fly spread down
-def dv01_neutral_butterfly_hegde_ratio(
+def dv01_neutral_butterfly_hedge_ratio(
     as_of_date: datetime,
     front_wing_bond_row: Dict | pd.Series,
     belly_bond_row: Dict | pd.Series,
@@ -328,6 +331,74 @@ def dv01_neutral_butterfly_hegde_ratio(
         "rough_12m_carry_roll": (belly_metrics["rough_carry"] + belly_metrics["rough_12m_rolldown"])
         - (hedge_ratios["front_wing_hr"] * (front_wing_metrics["rough_carry"] + front_wing_metrics["rough_12m_rolldown"]))
         - (hedge_ratios["back_wing_hr"] * (back_wing_metrics["rough_carry"] + back_wing_metrics["rough_12m_rolldown"])),
+    }
+
+
+@dataclass
+class HedgeHogSwapFlyLeg:
+    tenor: str
+    fixed_rate: float
+    weighting: float
+
+
+@dataclass
+class HedgeHogSwapFly:
+    short_wing: HedgeHogSwapFlyLeg
+    belly: HedgeHogSwapFlyLeg
+    long_wing: HedgeHogSwapFlyLeg
+
+
+def pv01_neutral_butterfly_hedge_ratio(
+    date: datetime,
+    butterfly: HedgeHogSwapFly,
+    ql_curve: ql.DiscountCurve | ql.ZeroCurve | ql.ForwardCurve,
+    horizons: Optional[List[str]] = ["1M", "3M", "6M", "12M"],
+):
+    yts = ql.RelinkableYieldTermStructureHandle()
+    sofr = ql.Sofr(yts)
+    yts.linkTo(ql_curve)
+    engine = ql.DiscountingSwapEngine(yts)
+
+    fly: Dict[str, ql.OvernightIndexedSwap] = {}
+    carry_roll_results = {}
+    for leg in [butterfly.short_wing, butterfly.belly, butterfly.long_wing]:
+        ql.Settings.instance().evaluationDate = datetime_to_ql_date(date)
+        if "Fwd" in leg.tenor:
+            swap_tenor_str, fwd_tenor_str = leg.tenor.split(" Fwd ")
+        else:
+            swap_tenor_str = leg.tenor
+            fwd_tenor_str = "0D"
+
+        swap: ql.OvernightIndexedSwap = ql.MakeOIS(ql.Period(swap_tenor_str), sofr, leg.fixed_rate, ql.Period(fwd_tenor_str))
+        swap.setPricingEngine(engine)
+        fly[leg.tenor] = swap
+
+        rolldown_dict = {}
+        carry_dict = {}
+        for horizon in horizons:
+            rolled_swap: ql.OvernightIndexedSwap = ql.MakeOIS(ql.Period(swap_tenor_str) - ql.Period(horizon), sofr, 0, ql.Period(fwd_tenor_str))
+            rolled_swap.setPricingEngine(engine)
+            rolldown_dict[horizon] = (swap.fixedRate() - rolled_swap.fairRate()) * 10_000
+
+            fwd_rolled_swap: ql.OvernightIndexedSwap = ql.MakeOIS(
+                ql.Period(swap_tenor_str) - ql.Period(horizon), sofr, 0, ql.Period(fwd_tenor_str) + ql.Period(horizon)
+            )
+            carry_dict[horizon] = (fwd_rolled_swap.fairRate() - swap.fixedRate()) * 10_000
+
+        carry_roll_results[leg.fixed_rate] = {"rolldown": rolldown_dict, "carry": carry_dict}
+
+    weights = [butterfly.short_wing.weighting, butterfly.belly.weighting, butterfly.long_wing.weighting]
+    total_c_and_r_df = pd.DataFrame(
+        {
+            "Total C+R (bps)": pd.DataFrame({key: value["carry"] for key, value in carry_roll_results.items()}).dot(weights)
+            + pd.DataFrame({key: value["rolldown"] for key, value in carry_roll_results.items()}).dot(weights)
+        }
+    )
+
+    return {
+        "ql_fly": fly,
+        "total_carry_and_roll": total_c_and_r_df,
+        "carry_roll_results": carry_roll_results,
     }
 
 

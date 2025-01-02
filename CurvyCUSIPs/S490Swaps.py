@@ -1357,7 +1357,7 @@ class S490Swaps:
         yaxis_title: Optional[str] = None,
         yaxis_title_r: Optional[str] = None,
         stds: Optional[Dict[str, List[int]]] = {},
-        run_ou_mr_col_steps: Optional[Tuple[str, int]] = None,
+        run_ou_mr_col_steps: Optional[Tuple[str, int, datetime | None]] = None,
         fill_ou_bands: Optional[bool] = False,
         show_1_sigma_ou_band: Optional[bool] = False,
         show_2_sigma_ou_band: Optional[bool] = False,
@@ -1480,16 +1480,26 @@ class S490Swaps:
                 ax_right.tick_params(axis="y")
 
             if run_ou_mr_col_steps:
-                tenor_for_ou, time_steps = run_ou_mr_col_steps
+                copy_df = df.copy()
+                if len(run_ou_mr_col_steps) == 3:
+                    tenor_for_ou, time_steps, dt_offset = run_ou_mr_col_steps
+                    copy_df = copy_df[copy_df["Date"] <= dt_offset]
+                else:
+                    tenor_for_ou, time_steps = run_ou_mr_col_steps
                 if not tenor_for_ou in cols_to_plot:
                     raise ValueError("OU Mean Reversion only supported for left axis plotting")
 
-                ts_ou = df.set_index("Date")[[tenor_for_ou]].dropna()
+                ts_ou = copy_df.set_index("Date")[[tenor_for_ou]].dropna()
                 ou_forecast, optimal_holding_period = simulate_mean_reversion_ou(ts_ou, steps=time_steps)
+
+                base_case = np.round(ou_forecast["mean_reversion"].iloc[-1], 3)
+                bull_case = np.round(ou_forecast["+2_sigma"].iloc[-1] , 3)
+                stop_loss = np.round(ou_forecast["-2_sigma"].iloc[-1], 3)
+
                 lns += ax_left.plot(
                     ou_forecast.index,
                     ou_forecast["mean_reversion"],
-                    label=f"OU Mean Reversion (t+1), Optimal Holding Period: {np.ceil(optimal_holding_period)}d",
+                    label=f"OU Mean Reversion (t+1)\nTarget: {base_case}, Bull Case: {bull_case}, Stop-loss: {stop_loss}\nOptimal Holding Period: {np.ceil(optimal_holding_period)}d",
                     color="green",
                     linestyle="dashdot",
                 )
