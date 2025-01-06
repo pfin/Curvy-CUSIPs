@@ -19,6 +19,7 @@ from scipy.stats import zscore, tstd, norm
 from sklearn.decomposition import PCA
 from termcolor import colored
 
+from CurvyCUSIPs.CurveDataFetcher import CurveDataFetcher
 from CurvyCUSIPs.utils.dtcc_swaps_utils import DEFAULT_SWAP_TENORS, datetime_to_ql_date, tenor_to_years
 from CurvyCUSIPs.utils.ShelveDBWrapper import ShelveDBWrapper
 from CurvyCUSIPs.utils.mean_reversion import simulate_mean_reversion_ou
@@ -26,6 +27,9 @@ from CurvyCUSIPs.utils.mean_reversion import simulate_mean_reversion_ou
 
 class S490Swaps:
     s490_nyclose_db: ShelveDBWrapper = None
+    curve_data_fetcher: CurveDataFetcher = None
+    _ql_yts: ql.RelinkableYieldTermStructureHandle = None
+    _ql_sofr: ql.Sofr = None
 
     _logger = logging.getLogger(__name__)
     _debug_verbose: bool = False
@@ -36,18 +40,44 @@ class S490Swaps:
     def __init__(
         self,
         s490_curve_db_path: str,
+        curve_data_fetcher: CurveDataFetcher,
+        ql_yts: Optional[ql.RelinkableYieldTermStructureHandle] = None,
         debug_verbose: Optional[bool] = False,
         info_verbose: Optional[bool] = False,
         error_verbose: Optional[bool] = False,
     ):
-        self.setup_s490_nyclose_db(s490_curve_db_path=s490_curve_db_path)
-
         self._debug_verbose = debug_verbose
         self._error_verbose = error_verbose
         self._info_verbose = info_verbose
         self._no_logs_plz = not debug_verbose and not error_verbose and not info_verbose
-
         self._setup_logger()
+
+        self.setup_s490_nyclose_db(s490_curve_db_path=s490_curve_db_path)
+        self.curve_data_fetcher = curve_data_fetcher
+
+        self._ql_yts = ql_yts if ql_yts else ql.RelinkableYieldTermStructureHandle()
+        self._ql_sofr = ql.Sofr(self._ql_yts)
+        try:
+            sofr_fixings_df = self.curve_data_fetcher.nyfrb_data_fetcher.get_sofr_fixings_df(
+                start_date=datetime(2018, 4, 2),
+                end_date=datetime.today(),
+            )
+            sofr_fixings_df_date_col = "effectiveDate"
+            sofr_fixings_df_fixings_col = "percentRate"
+        except Exception as e:
+            self._logger.error(colored(f"S490Swaos init: Failed to fetch SOFR Fixing from NYFRB: {e}", "red"))
+            sofr_fixings_df = self.curve_data_fetcher.fred_data_fetcher.fred.get_multiple_series(
+                series_ids=["SOFR"], observation_start=datetime(2018, 4, 2), observation_end=datetime.today(), one_df=True
+            )
+            sofr_fixings_df = sofr_fixings_df.reset_index(names="Date")
+            sofr_fixings_df_date_col = "Date"
+            sofr_fixings_df_fixings_col = "SOFR"
+
+        sofr_fixings_df = sofr_fixings_df.dropna()
+        self._ql_sofr.addFixings(
+            [datetime_to_ql_date(ed) for ed in sofr_fixings_df[sofr_fixings_df_date_col]],
+            [fixing / 100 for fixing in sofr_fixings_df[sofr_fixings_df_fixings_col]],
+        )
 
     def _setup_logger(self):
         if not self._logger.hasHandlers():
@@ -125,7 +155,7 @@ class S490Swaps:
         ] = "logLinearDiscount",
         ql_zero_curve_method: Optional[ql.ZeroCurve] = ql.ZeroCurve,
         ql_compounding=ql.Compounded,
-        ql_compounding_freq=ql.Daily,
+        ql_compounding_freq=ql.Annual,
         use_ql_implied_ts: Optional[bool] = True,
         level_bps_adj: Optional[int] = 0,
     ) -> Tuple[Dict[datetime, pd.DataFrame], Dict[datetime, ql.DiscountCurve | ql.ZeroCurve | ql.ForwardCurve]]:
@@ -1493,7 +1523,7 @@ class S490Swaps:
                 ou_forecast, optimal_holding_period = simulate_mean_reversion_ou(ts_ou, steps=time_steps)
 
                 base_case = np.round(ou_forecast["mean_reversion"].iloc[-1], 3)
-                bull_case = np.round(ou_forecast["+2_sigma"].iloc[-1] , 3)
+                bull_case = np.round(ou_forecast["+2_sigma"].iloc[-1], 3)
                 stop_loss = np.round(ou_forecast["-2_sigma"].iloc[-1], 3)
 
                 lns += ax_left.plot(
