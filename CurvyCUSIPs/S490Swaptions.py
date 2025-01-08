@@ -12,6 +12,7 @@ import tqdm.asyncio
 from pandas.tseries.holiday import USFederalHolidayCalendar
 from pandas.tseries.offsets import BDay, CustomBusinessDay
 from termcolor import colored
+from functools import reduce
 
 from CurvyCUSIPs.S490Swaps import S490Swaps
 from CurvyCUSIPs.utils.ShelveDBWrapper import ShelveDBWrapper
@@ -316,6 +317,7 @@ class S490Swaptions:
         bdates: Optional[List[datetime]] = None,
         plot_timeseries: Optional[bool] = False,
         default_vol: Optional[Literal["Normal Vol", "Bpvol"]] = "Bpvol",
+        one_df: Optional[bool] = False,
     ) -> Dict[datetime, pd.DataFrame]:
         vol_timeseries: Dict[str, List[Dict[datetime, float, float]]] = {}
         for tenor, strike_offset in tenor_strike_pairs:
@@ -352,6 +354,7 @@ class S490Swaptions:
         self._logger.warning("ATM Vol Timeseries Errors Report: ")
         self._logger.warning(pd.DataFrame(errors))
 
+        dfs = []
         if plot_timeseries:
             plt.figure(figsize=(12, 8))
             default_title = []
@@ -365,6 +368,10 @@ class S490Swaptions:
                 most_recent_date = vol_timeseries[key]["Date"].iloc[-1].strftime("%Y-%m-%d")
                 most_recent_vol = vol_timeseries[key][default_vol].iloc[-1]
                 line.set_label(f"{key} - Latest: {most_recent_date}, {most_recent_vol:.2f} {default_vol}")
+                if one_df:
+                    curr_df = pd.DataFrame(vol_timeseries[key])[["Date", default_vol]]
+                    curr_df = curr_df.rename(columns={default_vol: key})
+                    dfs.append(curr_df)
 
             plt.xlabel("Date")
             plt.ylabel(default_vol)
@@ -374,6 +381,91 @@ class S490Swaptions:
         else:
             for tenor, strike_offset in tenor_strike_pairs:
                 key = self._format_swaption_tenor_key(tenor, strike_offset)
-                vol_timeseries[key] = pd.DataFrame(vol_timeseries[key])
+                if one_df:
+                    curr_df = pd.DataFrame(vol_timeseries[key])[["Date", default_vol]]
+                    curr_df = curr_df.rename(columns={default_vol: key})
+                    dfs.append(curr_df)
+                else:
+                    vol_timeseries[key] = pd.DataFrame(vol_timeseries[key])
+
+        if one_df:
+            return reduce(lambda left, right: left.merge(right, on="Date", how="outer"), dfs)
 
         return vol_timeseries
+
+    def get_ql_atm_surface_handle(self, date: datetime):
+        atm_vol_grid_df = self.get_vol_surfaces(date=date, strike_offset=0)[date]
+        return ql.SwaptionVolatilityStructureHandle(
+            ql.SwaptionVolatilityMatrix(
+                ql.UnitedStates(ql.UnitedStates.GovernmentBond),
+                ql.ModifiedFollowing,
+                [ql.Period(e) for e in atm_vol_grid_df.index],
+                [ql.Period(t) for t in atm_vol_grid_df.columns],
+                ql.Matrix([[vol / 10_000 for vol in row] for row in atm_vol_grid_df.values]),
+                ql.Actual360(),
+                False,
+                ql.Normal,
+            )
+        )
+
+    def get_vol_cube(self, date: datetime) -> Dict[Literal[-200, -100, -50, -25, -10, 0, 10, 25, 50, 100, 200], pd.DataFrame]:
+        return {
+            -200: self.get_vol_surfaces(date=date, strike_offset=-200)[date],
+            -100: self.get_vol_surfaces(date=date, strike_offset=-100)[date],
+            -50: self.get_vol_surfaces(date=date, strike_offset=-50)[date],
+            -25: self.get_vol_surfaces(date=date, strike_offset=-25)[date],
+            -10: self.get_vol_surfaces(date=date, strike_offset=-10)[date],
+            0: self.get_vol_surfaces(date=date, strike_offset=0)[date],
+            10: self.get_vol_surfaces(date=date, strike_offset=10)[date],
+            25: self.get_vol_surfaces(date=date, strike_offset=25)[date],
+            50: self.get_vol_surfaces(date=date, strike_offset=50)[date],
+            100: self.get_vol_surfaces(date=date, strike_offset=100)[date],
+            200: self.get_vol_surfaces(date=date, strike_offset=200)[date],
+        }
+
+    def get_ql_vol_cube_handle(self, date: datetime) -> ql.SwaptionVolatilityStructureHandle:
+        vol_cube_dict = self.get_vol_cube(date=date)
+        atm_vol_surface = vol_cube_dict[0]
+        atm_vol_surface = atm_vol_surface.drop("9M")
+
+        expiries = [ql.Period(e) for e in atm_vol_surface.index]
+        tails = [ql.Period(t) for t in atm_vol_surface.columns]
+
+        atm_swaption_vol_matrix = ql.SwaptionVolatilityMatrix(
+            ql.UnitedStates(ql.UnitedStates.GovernmentBond),
+            ql.ModifiedFollowing,
+            expiries,
+            tails,
+            ql.Matrix([[vol / 10_000 for vol in row] for row in atm_vol_surface.values]),
+            ql.Actual360(),
+            False,
+            ql.Normal,
+        )
+
+        vol_spreads = []
+        strike_spreads = [float(k) / 10000 for k in vol_cube_dict.keys()]
+        strike_offsets = sorted(vol_cube_dict.keys(), key=lambda x: int(x))
+        for option_tenor in atm_vol_surface.index:
+            for swap_tenor in atm_vol_surface.columns:
+                vol_spread_row = [
+                    ql.QuoteHandle(
+                        ql.SimpleQuote((vol_cube_dict[strike].loc[option_tenor, swap_tenor] - atm_vol_surface.loc[option_tenor, swap_tenor]) / 10_000)
+                    )
+                    for strike in strike_offsets
+                ]
+                vol_spreads.append(vol_spread_row)
+
+        ql_vol_cube_handle = ql.SwaptionVolatilityStructureHandle(
+            ql.InterpolatedSwaptionVolatilityCube(
+                ql.SwaptionVolatilityStructureHandle(atm_swaption_vol_matrix),
+                expiries,
+                tails,
+                strike_spreads,
+                vol_spreads,
+                ql.OvernightIndexedSwapIndex("SOFR-OIS", ql.Period("1D"), 2, ql.USDCurrency(), self.s490_swaps._ql_sofr),
+                ql.OvernightIndexedSwapIndex("SOFR-OIS", ql.Period("1D"), 2, ql.USDCurrency(), self.s490_swaps._ql_sofr),
+                False,
+            )
+        )
+
+        return ql_vol_cube_handle

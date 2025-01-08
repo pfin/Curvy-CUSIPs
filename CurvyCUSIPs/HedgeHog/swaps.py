@@ -1,25 +1,15 @@
-import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Literal
 
 import numpy as np
-import numpy.typing as npt
 import pandas as pd
 import rateslib as rl
 import QuantLib as ql
-import scipy
-import statsmodels.api as sm
 import ujson as json
-from scipy.optimize import minimize
-from sklearn.linear_model import LinearRegression
 from termcolor import colored
 
-from CurvyCUSIPs.USTs import USTs
-from CurvyCUSIPs.utils.arbitragelab import EngleGrangerPortfolio, JohansenPortfolio, construct_spread
 from CurvyCUSIPs.utils.dtcc_swaps_utils import datetime_to_ql_date
-from CurvyCUSIPs.utils.regression_utils import run_odr
-from CurvyCUSIPs.CurveDataFetcher import CurveDataFetcher
 
 
 @dataclass
@@ -29,6 +19,8 @@ class SwapLeg:
     original_fixed_rate: float
     weighting: float = None
     key: str = None
+    notional: str = None
+    type: Literal["receiver", "payer"] = None
 
 
 def ql_curve_to_rl_curve(ql_curve: ql.DiscountCurve | ql.ZeroCurve | ql.ForwardCurve):
@@ -69,12 +61,12 @@ def calibrate_rl_curve(date: datetime, tenor_spot_df: pd.DataFrame):
 def swap_leg_portfolio_to_rl_portfolio(swap_portfolio: List[SwapLeg]):
     return [rl.IRS(rl.dt(2022, 1, 1), "1m", "A", curves="sofr") for swap_leg in swap_portfolio]
 
-
 def book_metrics(
     swap_portfolio: List[SwapLeg],
     ql_curve: ql.DiscountCurve | ql.ZeroCurve | ql.ForwardCurve,
     ql_yts: ql.RelinkableYieldTermStructureHandle,
     ql_sofr: ql.Sofr,
+    agg_c_and_r_results: Optional[bool] = False,
 ):
     # ql.Settings.instance().evaluationDate = datetime_to_ql_date(date)
     cal = ql.UnitedStates(ql.UnitedStates.GovernmentBond)
@@ -102,12 +94,13 @@ def book_metrics(
             ql_sofr,
             swap_leg.original_fixed_rate,
             ql.Period(fwd_tenor_str),
-            swapType=ql.OvernightIndexedSwap.Receiver if swap_leg.weighting > 0 else ql.OvernightIndexedSwap.Payer,
+            swapType=ql.OvernightIndexedSwap.Receiver if swap_leg.type == "receiver" else ql.OvernightIndexedSwap.Payer,
             effectiveDate=effective_date,
             terminationDate=cal.advance(effective_date, ql.Period(swap_tenor_str)),
             paymentAdjustmentConvention=ql.ModifiedFollowing,
             paymentLag=2,
             fixedLegDayCount=ql.Actual360(),
+            nominal=swap_leg.notional if swap_leg.notional else -1 if swap_leg.weighting < 0 else 1,
         )
         swap.setPricingEngine(engine)
 
@@ -167,15 +160,16 @@ def book_metrics(
 
         carry_roll_results[swap_leg.key or curr_tenor] = {"roll": rolldown_dict, "carry": carry_dict}
 
-    weights = np.array([s.weighting for s in swap_portfolio])
-    total_c_and_r_df = pd.DataFrame(
-        {
-            "Total C+R (bps)": pd.DataFrame({key: value["carry"] for key, value in carry_roll_results.items()}).dot(weights)
-            + pd.DataFrame({key: value["roll"] for key, value in carry_roll_results.items()}).dot(weights)
-        }
-    )
+    if agg_c_and_r_results:
+        weights = np.array([s.weighting for s in swap_portfolio])
+        total_c_and_r_df = pd.DataFrame(
+            {
+                "Total C+R (bps)": pd.DataFrame({key: value["carry"] for key, value in carry_roll_results.items()}).dot(weights)
+                + pd.DataFrame({key: value["roll"] for key, value in carry_roll_results.items()}).dot(weights)
+            }
+        )
 
-    return {"total_carry_and_roll": total_c_and_r_df, "bps_running": carry_roll_results, "book": book, "book_bps": book_bps}
+    return {"total_carry_and_roll": total_c_and_r_df if agg_c_and_r_results else None, "bps_running": carry_roll_results, "book": book, "book_bps": book_bps}
 
 
 def dv01_neutral_curve_hedge_ratio(
@@ -315,7 +309,7 @@ def dv01_neutral_curve_hedge_ratio(
             cr_bps_running_results=cr_bps_running_dict,
             front_leg_weighting=beta_adjustment_wrt_back_leg,
             back_leg_weighting=back_leg_swap.weighting,
-        ),
+        ) if beta_adjustment_wrt_back_leg else None,
         "2M_carry_and_roll_bps_running": _calc_curve_bps_running_carry_and_roll(
             tenor="60D",
             cr_bps_running_results=cr_bps_running_dict,
@@ -327,7 +321,7 @@ def dv01_neutral_curve_hedge_ratio(
             cr_bps_running_results=cr_bps_running_dict,
             front_leg_weighting=beta_adjustment_wrt_back_leg,
             back_leg_weighting=back_leg_swap.weighting,
-        ),
+        ) if beta_adjustment_wrt_back_leg else None,
         "3M_carry_and_roll_bps_running": _calc_curve_bps_running_carry_and_roll(
             tenor="90D",
             cr_bps_running_results=cr_bps_running_dict,
@@ -339,7 +333,7 @@ def dv01_neutral_curve_hedge_ratio(
             cr_bps_running_results=cr_bps_running_dict,
             front_leg_weighting=beta_adjustment_wrt_back_leg,
             back_leg_weighting=back_leg_swap.weighting,
-        ),
+        ) if beta_adjustment_wrt_back_leg else None,
         "6M_carry_and_roll_bps_running": _calc_curve_bps_running_carry_and_roll(
             tenor="180D",
             cr_bps_running_results=cr_bps_running_dict,
@@ -351,7 +345,7 @@ def dv01_neutral_curve_hedge_ratio(
             cr_bps_running_results=cr_bps_running_dict,
             front_leg_weighting=beta_adjustment_wrt_back_leg,
             back_leg_weighting=back_leg_swap.weighting,
-        ),
+        ) if beta_adjustment_wrt_back_leg else None,
         "total_trade_notional": total_trade_notional,
         "front_leg": {
             "hr": hr,

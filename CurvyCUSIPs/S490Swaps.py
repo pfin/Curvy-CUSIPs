@@ -1,21 +1,19 @@
 import itertools
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Literal, Optional, Tuple, Annotated
 
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-import random
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import QuantLib as ql
 from joblib import Parallel, delayed
 import tqdm
-from tqdm_joblib import tqdm_joblib
 from pandas.tseries.holiday import USFederalHolidayCalendar
 from pandas.tseries.offsets import BDay, CustomBusinessDay
-from scipy.stats import zscore, tstd, norm
+from scipy.stats import zscore, tstd
 from sklearn.decomposition import PCA
 from termcolor import colored
 
@@ -30,6 +28,8 @@ class S490Swaps:
     curve_data_fetcher: CurveDataFetcher = None
     _ql_yts: ql.RelinkableYieldTermStructureHandle = None
     _ql_sofr: ql.Sofr = None
+    _sofr_fixing_dates: List[datetime] = None
+    _sofr_fixings: List[float] = None
 
     _logger = logging.getLogger(__name__)
     _debug_verbose: bool = False
@@ -73,10 +73,17 @@ class S490Swaps:
             sofr_fixings_df_date_col = "Date"
             sofr_fixings_df_fixings_col = "SOFR"
 
-        sofr_fixings_df = sofr_fixings_df.dropna()
+        sofr_fixings_df = sofr_fixings_df[
+            (sofr_fixings_df[sofr_fixings_df_fixings_col].notna()) & (sofr_fixings_df[sofr_fixings_df_date_col].notna())
+        ]
+        self._sofr_fixing_dates = sofr_fixings_df[sofr_fixings_df_date_col] 
+        self._sofr_fixings = sofr_fixings_df[sofr_fixings_df_fixings_col] 
+        if sofr_fixings_df.empty:
+            raise ValueError("Failed to add fixings")
         self._ql_sofr.addFixings(
-            [datetime_to_ql_date(ed) for ed in sofr_fixings_df[sofr_fixings_df_date_col]],
-            [fixing / 100 for fixing in sofr_fixings_df[sofr_fixings_df_fixings_col]],
+            [datetime_to_ql_date(ed) for ed in self._sofr_fixing_dates],
+            [fixing / 100 for fixing in self._sofr_fixings],
+            forceOverwrite=True,
         )
 
     def _setup_logger(self):

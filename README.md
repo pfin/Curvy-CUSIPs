@@ -104,6 +104,25 @@ python update_swaption_vol_cube.py
 - Spread, Flies plotting
 - Swap Fwds
 
+### [swaption_basics.ipynb](https://github.com/yieldcurvemonkey/Curvy-CUSIPs/blob/main/notebooks/swaption_basics.ipynb) 
+
+- similar to NSV and VCUB screens 
+- Historical ATM Grids
+- Historical Vol Cubes
+- Plotting 3 surfaces  
+    - expiry-tail
+    - expiry-strike
+    - tail-strike
+- Vol Timeseries 
+
+
+### [swaption_pricer.ipynb](https://github.com/yieldcurvemonkey/Curvy-CUSIPs/blob/main/notebooks/swaption_pricer.ipynb)
+
+- Recreating the SWPM screen
+
+![womp womp](./dump/swaption_pricer_demo.png)
+
+
 ### [par_curves.ipynb](https://github.com/yieldcurvemonkey/Curvy-CUSIPs/blob/main/notebooks/par_curves.ipynb)
 
 - Plot your splines/par curve model against all active CUSIPs on a historical date

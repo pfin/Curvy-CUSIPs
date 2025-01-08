@@ -86,7 +86,7 @@ async def fetch_from_github(
 def setup_s490_atm_vol_db():
     urls = [
         f"https://raw.githubusercontent.com/yieldcurvemonkey/VolCube420/refs/heads/main/atm_timeseries/{yr}.json"
-        for yr in [2024, 2023, 2022, 2021, 2020, 2019, 2018, 2017]
+        for yr in [2025, 2024, 2023, 2022, 2021, 2020, 2019, 2018, 2017]
     ]
 
     async def build_tasks(client: httpx.AsyncClient):

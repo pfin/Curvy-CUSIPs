@@ -45,6 +45,8 @@ DEFAULT_SWAP_TENORS = [
     "50Y",
 ]
 
+def ql_date_to_datetime(ql_date: ql.Date):
+    return datetime(ql_date.year(), ql_date.month(), ql_date.dayOfMonth())
 
 def datetime_to_ql_date(dt):
     day = dt.day
