@@ -61,6 +61,7 @@ def calibrate_rl_curve(date: datetime, tenor_spot_df: pd.DataFrame):
 def swap_leg_portfolio_to_rl_portfolio(swap_portfolio: List[SwapLeg]):
     return [rl.IRS(rl.dt(2022, 1, 1), "1m", "A", curves="sofr") for swap_leg in swap_portfolio]
 
+
 def book_metrics(
     swap_portfolio: List[SwapLeg],
     ql_curve: ql.DiscountCurve | ql.ZeroCurve | ql.ForwardCurve,
@@ -68,7 +69,6 @@ def book_metrics(
     ql_sofr: ql.Sofr,
     agg_c_and_r_results: Optional[bool] = False,
 ):
-    # ql.Settings.instance().evaluationDate = datetime_to_ql_date(date)
     cal = ql.UnitedStates(ql.UnitedStates.GovernmentBond)
     ql_yts.linkTo(ql_curve)
     engine = ql.DiscountingSwapEngine(ql_yts)
@@ -76,6 +76,7 @@ def book_metrics(
     book: Dict[str, ql.OvernightIndexedSwap] = {}
     carry_roll_results = {}
     book_bps = 0
+    skip_c_and_r_calc = False
     for swap_leg in swap_portfolio:
         if swap_leg.weighting == 0:
             continue
@@ -89,6 +90,7 @@ def book_metrics(
         effective_date = cal.advance(datetime_to_ql_date(swap_leg.trade_date), ql.Period("2D"))
         effective_date = cal.advance(effective_date, ql.Period(fwd_tenor_str))
 
+        ql.Settings.instance().evaluationDate = datetime_to_ql_date(swap_leg.trade_date)
         swap: ql.OvernightIndexedSwap = ql.MakeOIS(
             ql.Period(swap_tenor_str),
             ql_sofr,
@@ -105,6 +107,7 @@ def book_metrics(
         swap.setPricingEngine(engine)
 
         curr_fwd_days = swap.startDate() - (ql.Date.todaysDate() - ql.Period("1D"))
+        copy_swap_tenor_str = swap_tenor_str
         curr_tenor = (
             f"{curr_fwd_days}D Fwd {swap_tenor_str}" if curr_fwd_days > 0 else f"{np.round((swap.maturityDate() - ql.Date.todaysDate()) / 360, 3)}Y"
         )
@@ -119,6 +122,11 @@ def book_metrics(
 
         rolldown_dict = {}
         carry_dict = {}
+
+        if "W" in copy_swap_tenor_str or "M" in copy_swap_tenor_str:
+            skip_c_and_r_calc = True
+            continue
+
         for horizon_days, horizon_months in dict(zip(["30D", "60D", "90D", "180D", "360D"], ["1M", "2M", "3M", "6M", "12M"])).items():
             rolled_maturity: ql.Period = (
                 ql.Period(swap_tenor_str) - ql.Period(horizon_days)
@@ -160,7 +168,7 @@ def book_metrics(
 
         carry_roll_results[swap_leg.key or curr_tenor] = {"roll": rolldown_dict, "carry": carry_dict}
 
-    if agg_c_and_r_results:
+    if agg_c_and_r_results and not skip_c_and_r_calc:
         weights = np.array([s.weighting for s in swap_portfolio])
         total_c_and_r_df = pd.DataFrame(
             {
@@ -169,7 +177,12 @@ def book_metrics(
             }
         )
 
-    return {"total_carry_and_roll": total_c_and_r_df if agg_c_and_r_results else None, "bps_running": carry_roll_results, "book": book, "book_bps": book_bps}
+    return {
+        "total_carry_and_roll": total_c_and_r_df if agg_c_and_r_results and not skip_c_and_r_calc else None,
+        "bps_running": carry_roll_results,
+        "book": book,
+        "book_bps": book_bps,
+    }
 
 
 def dv01_neutral_curve_hedge_ratio(
@@ -304,48 +317,64 @@ def dv01_neutral_curve_hedge_ratio(
             front_leg_weighting=front_leg_swap.weighting,
             back_leg_weighting=back_leg_swap.weighting,
         ),
-        "1M_carry_and_roll_bps_running_beta_weighted": _calc_curve_bps_running_carry_and_roll(
-            tenor="30D",
-            cr_bps_running_results=cr_bps_running_dict,
-            front_leg_weighting=beta_adjustment_wrt_back_leg,
-            back_leg_weighting=back_leg_swap.weighting,
-        ) if beta_adjustment_wrt_back_leg else None,
+        "1M_carry_and_roll_bps_running_beta_weighted": (
+            _calc_curve_bps_running_carry_and_roll(
+                tenor="30D",
+                cr_bps_running_results=cr_bps_running_dict,
+                front_leg_weighting=beta_adjustment_wrt_back_leg,
+                back_leg_weighting=back_leg_swap.weighting,
+            )
+            if beta_adjustment_wrt_back_leg
+            else None
+        ),
         "2M_carry_and_roll_bps_running": _calc_curve_bps_running_carry_and_roll(
             tenor="60D",
             cr_bps_running_results=cr_bps_running_dict,
             front_leg_weighting=front_leg_swap.weighting,
             back_leg_weighting=back_leg_swap.weighting,
         ),
-        "2M_carry_and_roll_bps_running_beta_weighted": _calc_curve_bps_running_carry_and_roll(
-            tenor="60D",
-            cr_bps_running_results=cr_bps_running_dict,
-            front_leg_weighting=beta_adjustment_wrt_back_leg,
-            back_leg_weighting=back_leg_swap.weighting,
-        ) if beta_adjustment_wrt_back_leg else None,
+        "2M_carry_and_roll_bps_running_beta_weighted": (
+            _calc_curve_bps_running_carry_and_roll(
+                tenor="60D",
+                cr_bps_running_results=cr_bps_running_dict,
+                front_leg_weighting=beta_adjustment_wrt_back_leg,
+                back_leg_weighting=back_leg_swap.weighting,
+            )
+            if beta_adjustment_wrt_back_leg
+            else None
+        ),
         "3M_carry_and_roll_bps_running": _calc_curve_bps_running_carry_and_roll(
             tenor="90D",
             cr_bps_running_results=cr_bps_running_dict,
             front_leg_weighting=front_leg_swap.weighting,
             back_leg_weighting=back_leg_swap.weighting,
         ),
-        "3M_carry_and_roll_bps_running_beta_weighted": _calc_curve_bps_running_carry_and_roll(
-            tenor="90D",
-            cr_bps_running_results=cr_bps_running_dict,
-            front_leg_weighting=beta_adjustment_wrt_back_leg,
-            back_leg_weighting=back_leg_swap.weighting,
-        ) if beta_adjustment_wrt_back_leg else None,
+        "3M_carry_and_roll_bps_running_beta_weighted": (
+            _calc_curve_bps_running_carry_and_roll(
+                tenor="90D",
+                cr_bps_running_results=cr_bps_running_dict,
+                front_leg_weighting=beta_adjustment_wrt_back_leg,
+                back_leg_weighting=back_leg_swap.weighting,
+            )
+            if beta_adjustment_wrt_back_leg
+            else None
+        ),
         "6M_carry_and_roll_bps_running": _calc_curve_bps_running_carry_and_roll(
             tenor="180D",
             cr_bps_running_results=cr_bps_running_dict,
             front_leg_weighting=front_leg_swap.weighting,
             back_leg_weighting=back_leg_swap.weighting,
         ),
-        "6M_carry_and_roll_bps_running_beta_weighted": _calc_curve_bps_running_carry_and_roll(
-            tenor="180D",
-            cr_bps_running_results=cr_bps_running_dict,
-            front_leg_weighting=beta_adjustment_wrt_back_leg,
-            back_leg_weighting=back_leg_swap.weighting,
-        ) if beta_adjustment_wrt_back_leg else None,
+        "6M_carry_and_roll_bps_running_beta_weighted": (
+            _calc_curve_bps_running_carry_and_roll(
+                tenor="180D",
+                cr_bps_running_results=cr_bps_running_dict,
+                front_leg_weighting=beta_adjustment_wrt_back_leg,
+                back_leg_weighting=back_leg_swap.weighting,
+            )
+            if beta_adjustment_wrt_back_leg
+            else None
+        ),
         "total_trade_notional": total_trade_notional,
         "front_leg": {
             "hr": hr,

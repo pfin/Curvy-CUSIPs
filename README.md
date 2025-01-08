@@ -115,6 +115,12 @@ python update_swaption_vol_cube.py
     - tail-strike
 - Vol Timeseries 
 
+### [swap_pricer.ipynb](https://github.com/yieldcurvemonkey/Curvy-CUSIPs/blob/main/notebooks/swap_pricer.ipynb)
+
+- Recreating the SWPM screen
+
+![womp womp](./dump/Screenshot%202025-01-08%20160645.png)
+
 
 ### [swaption_pricer.ipynb](https://github.com/yieldcurvemonkey/Curvy-CUSIPs/blob/main/notebooks/swaption_pricer.ipynb)
 
