@@ -146,109 +146,12 @@ python update_swaption_vol_cube.py
 
 ### [calculating_cash_hedge_ratios.ipynb](https://github.com/yieldcurvemonkey/Curvy-CUSIPs/blob/main/notebooks/calculating_cash_hedge_ratios.ipynb)
 
-For DV01 neutrality, if the DV01s of bonds $\text{Oct 26s}$ and $\text{Aug 34s}$ are $DV01_{\text{Oct 26s}}$ and $DV01_{\text{Aug 34s}}$,
-then $n_{\text{Oct 26s}}$ notional of bond $\text{Oct 26s}$ is hedged with $n_{\text{Aug 34s}}$ notional of bond $\text{Aug 34s}$ such that,
+- DV01 Neutrality, Beta and PCA risk weightings
 
-$$
-\frac{n_{\text{Oct 26s}} DV01_{\text{Oct 26s}}}{100} + \frac{n_{\text{Aug 34s}} DV01_{\text{Aug 34s}}}{100} = 0
-$$
+### [calculating_swap_hedge_ratios.ipynb](https://github.com/yieldcurvemonkey/Curvy-CUSIPs/blob/main/notebooks/calculating_swap_hedge_ratios.ipynb)
 
-$$
-n_{\text{Aug 34s}} = -n_{\text{Oct 26s}} \frac{DV01_\text{Oct 26s}}{DV01_\text{Aug 34s}}
-$$
-
-For regression hedging, we simply weight the above by the $\beta$ we found.
-
-$$
-\frac{n_{\text{Oct 26s}} DV01_{\text{Oct 26s}}}{100} \beta + \frac{n_{\text{Aug 34s}} DV01_{\text{Aug 34s}}}{100} = 0
-$$
-
-$$
-n_{\text{Aug 34s}} = -n_{\text{Oct 26s}} \frac{DV01_{\text{Oct 26s}}}{DV01_{\text{Aug 34s}}} \beta
-$$
-
-We can also extend the PCA framework for hedging purposes. PCA allows us to view and importantly quantify the driving forces of a trade into uncorrelated factors. This allows us to hedge against specific factors. Say for our `4.125% Oct-26s - 3.875% Aug-34s` steepener, we can simply see how changes in the first (level) factor impact the Oct 26s and Aug 34s and choose the hedge ratios in such a way that both net out. We have now exposure only to higher order PCs.
-
-$$
-\frac{n_\text{Aug 34s}}{n_{\text{Oct 26s}}} = \frac{DV01_{\text{Oct 26s}}}{DV01_\text{Aug 34s}} \cdot \frac{e_\text{Oct 26s}^1}{e_\text{Aug 34s}^1}.
-$$
-
-$e^1$ is the factor loadings (entries of the eigenvector) for PC1 of the respective bond. Factor loadings indicate how strongly each variable projects onto a principal component i.e. its the cosine of the angle between the variable's vector in the original space and the principal component's vector: a high factor loading means the variable is closely aligned with the principal component, contributing significantly to the variance captured by that component. The ratio 
-
-$$
-\frac{e_\text{Oct 26s}^1}{e_\text{Aug 34s}^1}
-$$
-
-may look like the beta weighting in regression hedging however this ratio is independent of conditional expectations or the regression framework and it rather represents the relative alignment of the two variables with the direction of the first principal component. Beta measures the conditional expectation of $x_1$ given $x_2$ and thus it is directional, reversing the roles of $x_1$ and $x_2$ results in a different $\beta$.
-
-For fly trades, say we want calculate the notional amounts needed on the wings for a 2s5s10s, we simply solve the below system:
-
-Suppose the PCA loadings for each maturity $i \in \{2Y, 5Y, 10Y\}$ on factor 1 are $e_{i,1}$ and on factor 2 are $e_{i,2}$. Also let $BPV_i$ be the "basis point value" (DV01) for each maturity. To be neutral to factor 1 and factor 2 means:
-
-$$
-n_2 \cdot (BPV_2 \cdot e_{2,1}) + n_5 \cdot (BPV_5 \cdot e_{5,1}) + n_{10} \cdot (BPV_{10} \cdot e_{10,1}) = 0
-$$
-
-$$
-n_2 \cdot (BPV_2 \cdot e_{2,2}) + n_5 \cdot (BPV_5 \cdot e_{5,2}) + n_{10} \cdot (BPV_{10} \cdot e_{10,2}) = 0
-$$
-
-Because you typically pick a notional for one leg (here the 5Y, $n_5$), these two equations become a $2 \times 2$ linear system in the unknowns $n_2$ and $n_{10}$.
-
-Rewriting those two neutrality conditions in matrix form:
-
-$$
-\begin{pmatrix}
-BPV_2 \cdot e_{2,1} & BPV_{10} \cdot e_{10,1} \\
-BPV_2 \cdot e_{2,2} & BPV_{10} \cdot e_{10,2}
-\end{pmatrix}
-\begin{pmatrix}
-n_2 \\
-n_{10}
-\end{pmatrix}
-= -n_5 \cdot BPV_5
-\begin{pmatrix}
-e_{5,1} \\
-e_{5,2}
-\end{pmatrix}.
-$$
-
-Symbolically:
-
-$$
-A \cdot 
-\begin{pmatrix}
-n_2 \\
-n_{10}
-\end{pmatrix}
-= \mathbf{b},
-$$
-where:
-$$
-A = \begin{pmatrix}
-BPV_2 \cdot e_{2,1} & BPV_{10} \cdot e_{10,1} \\
-BPV_2 \cdot e_{2,2} & BPV_{10} \cdot e_{10,2}
-\end{pmatrix}, 
-\quad 
-\mathbf{b} = -n_5 \cdot BPV_5
-\begin{pmatrix}
-e_{5,1} \\
-e_{5,2}
-\end{pmatrix}.
-$$
-
-Provided $A$ is invertible (which it usually is, assuming non-degenerate factor loadings and DV01s), the solution is simply:
-
-$$
-\begin{pmatrix}
-n_2 \\
-n_{10}
-\end{pmatrix}
-= A^{-1} \mathbf{b}.
-$$
-
-That yields the hedge ratios $n_2$ and $n_{10}$ (for a chosen $n_5$) such that the overall 2y–5y–10y position has zero exposure to the first two principal components.
-
+- Comparing with JPM's Rates Stratgey `10s/30s swap curve steepeners paired with a 16% weighted shorts in 2s` and `Buy the belly of a 6M forward 5s/10s/30s swap yield curve butterfly (-0.5:1.0:-0.5 weighted)`
+- PV01 Neutrality, Beta and PCA risk weightings
 
 ### [swaps_rv.ipynb](https://github.com/yieldcurvemonkey/Curvy-CUSIPs/blob/main/notebooks/swaps_rv.ipynb)
 

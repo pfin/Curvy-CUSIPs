@@ -1312,8 +1312,8 @@ class S490Swaps:
                             elif custom_fly_weights:
                                 spread = (
                                     (custom_fly_weights[1] * curr_df.loc[curr_df["Tenor"] == leg2, implied_fwd2].values[0])
-                                    - (custom_fly_weights[0] * curr_df.loc[curr_df["Tenor"] == leg1, implied_fwd1].values[0])
-                                    - (custom_fly_weights[2] * curr_df.loc[curr_df["Tenor"] == leg3, implied_fwd3].values[0])
+                                    + (custom_fly_weights[0] * curr_df.loc[curr_df["Tenor"] == leg1, implied_fwd1].values[0])
+                                    + (custom_fly_weights[2] * curr_df.loc[curr_df["Tenor"] == leg3, implied_fwd3].values[0])
                                 )
                             else:
                                 spread = (
@@ -1531,7 +1531,7 @@ class S490Swaps:
 
                 base_case = np.round(ou_forecast["mean_reversion"].iloc[-1], 3)
                 bull_case = np.round(ou_forecast["+2_sigma"].iloc[-1], 3)
-                stop_loss = np.round(ou_forecast["-2_sigma"].iloc[-1], 3)
+                stop_loss = np.round(ou_forecast["-2_sigma"].iloc[0], 3)
 
                 lns += ax_left.plot(
                     ou_forecast.index,
@@ -1574,11 +1574,12 @@ class S490Swaps:
                             linestyle="dashdot",
                         )
 
-            locator = mdates.AutoDateLocator(minticks=10, maxticks=20)
+            locator = mdates.AutoDateLocator(minticks=3, maxticks=15)
             formatter = mdates.DateFormatter("%Y-%m-%d")
             ax_left.xaxis.set_major_locator(locator)
             ax_left.xaxis.set_major_formatter(formatter)
             ax_left.set_xlabel("Date")
+            ax_left.set_xticks(ax_left.get_xticks(), ax_left.get_xticklabels(), rotation=25, ha='right')
 
             labs = [l.get_label() for l in lns]
             ax_left.legend(lns, labs, loc=(0, 0))
@@ -1588,6 +1589,6 @@ class S490Swaps:
                 else f"{' '.join(cols_to_plot)} Timeseries"
             )
             ax_left.grid(True)
-            plt.xticks(rotation=15)
+            plt.xticks(rotation=25)
             fig.tight_layout()
             plt.show()

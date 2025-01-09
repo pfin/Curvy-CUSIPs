@@ -377,6 +377,8 @@ def dv01_neutral_curve_hedge_ratio(
         ),
         "total_trade_notional": total_trade_notional,
         "front_leg": {
+            "current_yield": front_leg_swap.original_fixed_rate,
+            "current_weighted_yield": front_leg_swap.original_fixed_rate * front_leg_swap.weighting,
             "hr": hr,
             "bpv": bpv_hr,
             "notional": front_leg_notional,
@@ -408,6 +410,8 @@ def dv01_neutral_curve_hedge_ratio(
             ),
         },
         "back_leg": {
+            "current_yield": back_leg_swap.original_fixed_rate,
+            "current_weighted_yield": back_leg_swap.original_fixed_rate * back_leg_swap.weighting,
             "hr": 1,
             "bpv": 1,
             "notional": back_leg_notional,
@@ -469,22 +473,33 @@ def dv01_neutral_butterfly_hedge_ratio(
     book: Dict[str, ql.OvernightIndexedSwap] = book_metrics_dict["book"]
     cr_bps_running_dict = book_metrics_dict["bps_running"]
 
+    # explictly sign/check signs
+    front_wring_bpv_hr = (book["belly"].fixedLegBPS() / book[front_leg_swap.key].fixedLegBPS()) * front_leg_swap.weighting
+    front_wring_bpv_hr = np.abs(front_wring_bpv_hr) if front_leg_swap.weighting > 0 else np.abs(front_wring_bpv_hr) * -1
+
+    back_wring_bpv_hr = (book["belly"].fixedLegBPS() / book[back_leg_swap.key].fixedLegBPS()) * np.abs(back_leg_swap.weighting)
+    back_wring_bpv_hr = np.abs(back_wring_bpv_hr) if back_leg_swap.weighting > 0 else np.abs(back_wring_bpv_hr) * -1
+
     bpv_hedge_ratios = {
-        "front_wing_hr": (book["belly"].fixedLegBPS() / book[front_leg_swap.key].fixedLegBPS()) * front_leg_swap.weighting * -1,
+        "front_wing_hr": front_wring_bpv_hr,
         "belly_hr": belly_swap.weighting,
-        "back_wing_hr": (book["belly"].fixedLegBPS() / book[back_leg_swap.key].fixedLegBPS()) * back_leg_swap.weighting * -1,
+        "back_wing_hr": back_wring_bpv_hr,
     }
     print(colored(f"BPV Neutral Hedge Ratio:", "light_blue")) if verbose else None
     print(json.dumps(bpv_hedge_ratios, indent=4)) if verbose else None
 
     is_beta_weighted = front_wing_beta_adjustment_wrt_belly and back_wing_beta_adjustment_wrt_belly
     if is_beta_weighted:
+        # explictly sign/check signs
+        front_wring_beta_hr = (book["belly"].fixedLegBPS() / book[front_leg_swap.key].fixedLegBPS()) * front_wing_beta_adjustment_wrt_belly
+        front_wring_beta_hr = np.abs(front_wring_beta_hr) if front_leg_swap.weighting > 0 else np.abs(front_wring_beta_hr) * -1
+        back_wring_beta_hr = (book["belly"].fixedLegBPS() / book[back_leg_swap.key].fixedLegBPS()) * back_wing_beta_adjustment_wrt_belly
+        back_wring_beta_hr = np.abs(back_wring_beta_hr) if back_leg_swap.weighting > 0 else np.abs(back_wring_beta_hr) * -1
         print(colored(f"Beta Weighted Hedge Ratio:", "light_magenta")) if verbose else None
         hedge_ratios = {
-            "front_wing_hr": (book["belly"].fixedLegBPS() / book[front_leg_swap.key].fixedLegBPS() * front_wing_beta_adjustment_wrt_belly),
+            "front_wing_hr": front_wring_beta_hr,
             "belly_hr": belly_swap.weighting,
-            "back_wing_hr": (book["belly"].fixedLegBPS() / book[back_leg_swap.key].fixedLegBPS() * back_wing_beta_adjustment_wrt_belly)
-            * back_wing_beta_adjustment_wrt_belly,
+            "back_wing_hr": back_wring_beta_hr,
         }
         print(json.dumps(hedge_ratios, indent=4)) if verbose else None
     else:
@@ -492,14 +507,16 @@ def dv01_neutral_butterfly_hedge_ratio(
 
     is_long_or_short = (belly_swap.weighting / np.abs(belly_swap.weighting)) * -1
     if fly_pvbp:
-        belly_notional = np.abs(fly_pvbp / book["belly"].fixedLegBPS() * 2) * is_long_or_short * -1
+        abs_belly_notional = np.abs(fly_pvbp / book["belly"].fixedLegBPS() * 2)
+        belly_notional = abs_belly_notional if hedge_ratios["belly_hr"] > 0 else abs_belly_notional * -1
 
     if total_trade_notional is not None:
         if front_wing_notional is not None or belly_notional is not None or back_wing_notional is not None:
             raise ValueError("Cannot provide total_trade_notional along with individual leg par amounts.")
 
         total_hr_abs = hedge_ratios["front_wing_hr"] + hedge_ratios["belly_hr"] + hedge_ratios["back_wing_hr"]
-        belly_notional = (total_trade_notional / total_hr_abs) * is_long_or_short * -1
+        abs_belly_notional = np.abs((total_trade_notional / total_hr_abs))
+        belly_notional = abs_belly_notional if hedge_ratios["belly_hr"] > 0 else abs_belly_notional * -1
         front_wing_notional = hedge_ratios["front_wing_hr"] * np.abs(belly_notional)
         back_wing_notional = hedge_ratios["back_wing_hr"] * np.abs(belly_notional)
 
@@ -514,18 +531,22 @@ def dv01_neutral_butterfly_hedge_ratio(
             back_wing_notional = hedge_ratios["back_wing_hr"] * np.abs(belly_notional)
         elif front_wing_notional:
             front_wing_notional = front_wing_notional
-            belly_notional = np.abs(front_wing_notional) / hedge_ratios["front_wing_hr"]
-            back_wing_notional = hedge_ratios["back_wing_hr"] * (np.abs(front_wing_notional) / hedge_ratios["front_wing_hr"])
+            abs_belly_notional = np.abs(np.abs(front_wing_notional) / hedge_ratios["front_wing_hr"])
+            belly_notional = abs_belly_notional if hedge_ratios["belly_hr"] > 0 else abs_belly_notional * -1
+            abs_back_wing_notional = np.abs(hedge_ratios["back_wing_hr"] * (np.abs(front_wing_notional) / hedge_ratios["front_wing_hr"]))
+            back_wing_notional = abs_back_wing_notional if hedge_ratios["back_wing_hr"] > 0 else abs_back_wing_notional * -1
         elif back_wing_notional:
-            front_wing_notional = hedge_ratios["front_wing_hr"] * (np.abs(back_wing_notional) / hedge_ratios["back_wing_hr"])
-            belly_notional = np.abs(back_wing_notional) / hedge_ratios["back_wing_hr"]
+            abs_front_wing_notional = np.abs(hedge_ratios["front_wing_hr"] * (np.abs(back_wing_notional) / hedge_ratios["back_wing_hr"]))
+            front_wing_notional = abs_front_wing_notional if hedge_ratios["front_wing_hr"] > 0 else abs_front_wing_notional * -1
+            abs_belly_notional = np.abs(np.abs(back_wing_notional) / hedge_ratios["back_wing_hr"])
+            belly_notional = abs_belly_notional if hedge_ratios["belly_hr"] > 0 else abs_belly_notional * -1
             back_wing_notional = back_wing_notional
 
         total_trade_notional = front_wing_notional + belly_notional + back_wing_notional
 
-    notional_scaled_front_wing_pvbp = book["front_wing"].fixedLegBPS() * np.abs(front_wing_notional)
-    notional_scaled_belly_pvbp = book["belly"].fixedLegBPS() * np.abs(belly_notional)
-    notional_scaled_back_wing_pvbp = book["back_wing"].fixedLegBPS() * np.abs(back_wing_notional)
+    notional_scaled_front_wing_pvbp = book["front_wing"].fixedLegBPS() * np.abs(front_wing_notional) * -1
+    notional_scaled_belly_pvbp = book["belly"].fixedLegBPS() * np.abs(belly_notional) * -1
+    notional_scaled_back_wing_pvbp = book["back_wing"].fixedLegBPS() * np.abs(back_wing_notional) * -1
 
     if is_beta_weighted:
         derived_fly_pvbp = (
@@ -614,10 +635,12 @@ def dv01_neutral_butterfly_hedge_ratio(
         print(f"Beta Weigted 3M bps Running Carry & Roll: {bw_cr_3m_bps_running:.3f} bps") if is_beta_weighted else None
 
     return {
+        "is_long": is_long_or_short,
+        "risk_weights": [front_leg_swap.weighting, belly_swap.weighting, back_leg_swap.weighting],
         "current_fly_bps": (
-            (belly_swap.original_fixed_rate * np.abs(belly_swap.weighting))
-            - (front_leg_swap.original_fixed_rate * np.abs(front_leg_swap.weighting))
-            - (back_leg_swap.original_fixed_rate * np.abs(back_leg_swap.weighting))
+            (belly_swap.original_fixed_rate * belly_swap.weighting)
+            + (front_leg_swap.original_fixed_rate * front_leg_swap.weighting)
+            + (back_leg_swap.original_fixed_rate * back_leg_swap.weighting)
         )
         * 10_000,
         "current_fly_pvbp": np.abs(derived_fly_pvbp) * is_long_or_short,
@@ -700,6 +723,8 @@ def dv01_neutral_butterfly_hedge_ratio(
         ),
         "total_trade_notional": total_trade_notional,
         "front_wing": {
+            "current_yield": front_leg_swap.original_fixed_rate,
+            "current_weighted_yield": front_leg_swap.original_fixed_rate * front_leg_swap.weighting,
             "hr": hedge_ratios["front_wing_hr"],
             "bpv_hr": bpv_hedge_ratios["front_wing_hr"],
             "notional": front_wing_notional,
@@ -731,6 +756,8 @@ def dv01_neutral_butterfly_hedge_ratio(
             ),
         },
         "belly": {
+            "current_yield": belly_swap.original_fixed_rate,
+            "current_weighted_yield": belly_swap.original_fixed_rate * belly_swap.weighting,
             "hr": hedge_ratios["belly_hr"],
             "bpv_hr": bpv_hedge_ratios["belly_hr"],
             "notional": belly_notional,
@@ -748,6 +775,8 @@ def dv01_neutral_butterfly_hedge_ratio(
             },
         },
         "back_wing": {
+            "current_yield": back_leg_swap.original_fixed_rate,
+            "current_weighted_yield": back_leg_swap.original_fixed_rate * back_leg_swap.weighting,
             "hr": hedge_ratios["back_wing_hr"],
             "bpv_hr": bpv_hedge_ratios["back_wing_hr"],
             "notional": back_wing_notional,

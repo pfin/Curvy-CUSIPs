@@ -105,18 +105,24 @@ if __name__ == "__main__":
         end_date = (datetime.today() - BDay(1)).to_pydatetime()
         
     else:
+        if len(sys.argv) >= 2 and sys.argv[1] == "use_today":
+            day_num_offset = 0
+        else:
+            day_num_offset = 1
+
         my_db = ShelveDBWrapper(DB_PATH)
         my_db.open()
         most_recent_db_dt = datetime.fromtimestamp(int(max(my_db.keys())))
-        bday_offset = ((datetime.today() - BDay(1)) - most_recent_db_dt).days
-        
-        if bday_offset == 0 and len(sys.argv) == 1:
-            print(colored("DB is up to date - exiting...", "green"))
-            sys.exit()
+        bday_offset = ((datetime.today() - BDay(day_num_offset)) - most_recent_db_dt).days
+
+        if not (len(sys.argv) >= 2 and sys.argv[1] == "use_today"):
+            if bday_offset == 0 and len(sys.argv) == 1:
+                print(colored("DB is up to date - exiting...", "green"))
+                sys.exit()
 
         data_fetcher = CurveDataFetcher(error_verbose=verbose)
         start_date = (datetime.today() - BDay(bday_offset)).to_pydatetime()
-        end_date = datetime.today() if len(sys.argv) > 1 else (datetime.today() - BDay(1)).to_pydatetime()
+        end_date = datetime.today() if len(sys.argv) > 1 else (datetime.today() - BDay(day_num_offset)).to_pydatetime()
         print_sofr_fixing_rates_df = True 
         try:
             sofr_fixing_rates_df = data_fetcher.nyfrb_data_fetcher.get_sofr_fixings_df(start_date=start_date, end_date=end_date)
