@@ -164,3 +164,21 @@ python update_swaption_vol_cube.py
 ![til](./dump/sabrsmileexample.gif)
 
 ### More examples/notebooks coming soon
+
+### Todos
+
+- HedgeHog:
+    - key-rate duration
+    - partial pv01s
+    - swaption hedger
+        - vanillas
+        - conditionals
+    - beta_estimates:
+        - robust-rolling pca implementation
+
+- Spectral
+    - init dir
+    - PCA class enhancements
+
+- Tempora 
+    - init dir

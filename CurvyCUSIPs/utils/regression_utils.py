@@ -73,6 +73,7 @@ def run_basic_linear_regression_df(
     run_tls: Optional[bool] = False,
     run_gls: Optional[bool] = False,
     run_wls: Optional[bool | npt.ArrayLike] = None,
+    no_plot: Optional[bool] = False
 ):
     if x_col not in df.columns or y_col not in df.columns:
         raise Exception(f"{x_col} or {y_col} not in df cols")
@@ -102,7 +103,8 @@ def run_basic_linear_regression_df(
         mydata = RealData(X.T, y)
         myodr = ODR(mydata, linear, beta0=np.ones(X.shape[1] + 1))
         out = myodr.run()
-        print(out.pprint())
+        if not no_plot:
+            print(out.pprint())
 
         hedge_ratios = out.beta[1:]
         residuals = y - (X * hedge_ratios).sum(axis=1)
@@ -146,7 +148,8 @@ def run_basic_linear_regression_df(
             model = sm.OLS(y, X)
 
         results = model.fit()
-        print(results.summary())
+        if not no_plot:
+            print(results.summary())
 
         intercept = results.params[0]
         slope = results.params[1]
@@ -156,47 +159,49 @@ def run_basic_linear_regression_df(
         se_intercept = results.bse[0]
         se_slope = results.bse[1]
 
-    plt.figure()
+    if not no_plot:
+        plt.figure()
 
-    if date_color_bar:
-        df["date_numeric"] = (df["Date"] - df["Date"].min()).dt.total_seconds()
-        scatter = plt.scatter(df[x_col], df[y_col], c=df["date_numeric"], cmap="viridis")
-        cbar = plt.colorbar(scatter)
-        cbar.set_label("Date")
-        cbar_ticks = np.linspace(df["date_numeric"].min(), df["date_numeric"].max(), num=10)
-        cbar.set_ticks(cbar_ticks)
-        cbar.set_ticklabels(pd.to_datetime(cbar_ticks, unit="s", origin=df["Date"].min()).strftime("%Y-%m-%d"))
-    else:
-        plt.scatter(df[x_col], df[y_col])
+        if date_color_bar:
+            df["date_numeric"] = (df["Date"] - df["Date"].min()).dt.total_seconds()
+            scatter = plt.scatter(df[x_col], df[y_col], c=df["date_numeric"], cmap="viridis")
+            cbar = plt.colorbar(scatter)
+            cbar.set_label("Date")
+            cbar_ticks = np.linspace(df["date_numeric"].min(), df["date_numeric"].max(), num=10)
+            cbar.set_ticks(cbar_ticks)
+            cbar.set_ticklabels(pd.to_datetime(cbar_ticks, unit="s", origin=df["Date"].min()).strftime("%Y-%m-%d"))
+        else:
+            plt.scatter(df[x_col], df[y_col])
 
-    if plot_most_recent:
-        most_recent = df["Date"].iloc[-1]
-        plt.scatter(
-            df[x_col].iloc[-1],
-            df[y_col].iloc[-1],
-            color="orange",
-            s=100,
-            label=f"Most Recent: {most_recent}",
+        if plot_most_recent:
+            most_recent = df["Date"].iloc[-1]
+            plt.scatter(
+                df[x_col].iloc[-1],
+                df[y_col].iloc[-1],
+                color="orange",
+                s=100,
+                label=f"Most Recent: {most_recent}",
+            )
+
+        regression_line = intercept + slope * df[x_col]
+        plt.plot(df[x_col], regression_line, color="blue")
+        plt.xlabel(x_col if not on_diff else f"Δ{x_col}")
+        plt.ylabel(y_col if not on_diff else f"Δ{y_col}")
+        plt.title(
+            title or f"{regression_type} - {y_col} Regressed on {x_col}" if not on_diff else f"{regression_type} - Δ{y_col} Regressed on Δ{x_col}",
+            fontdict={"fontsize": "large"},
         )
+        equation_text = (
+            f"y = {intercept:.3f} + {slope:.3f}*{slope_name}\n"
+            f"R² = {r_squared:.3f}\n"
+            f"SE (Intercept) = {se_intercept:.3f}, SE ({slope_name}) = {se_slope:.3f}\n"
+            f"p-value ({slope_name}) = {p_value:.3e}"
+        )
+        plt.plot([], [], " ", label=f"{equation_text}")
+        plt.legend(fontsize="large")
+        plt.grid(True)
 
-    regression_line = intercept + slope * df[x_col]
-    plt.plot(df[x_col], regression_line, color="blue")
-    plt.xlabel(x_col if not on_diff else f"Δ{x_col}")
-    plt.ylabel(y_col if not on_diff else f"Δ{y_col}")
-    plt.title(
-        title or f"{regression_type} - {y_col} Regressed on {x_col}" if not on_diff else f"{regression_type} - Δ{y_col} Regressed on Δ{x_col}",
-        fontdict={"fontsize": "large"},
-    )
-    equation_text = (
-        f"y = {intercept:.3f} + {slope:.3f}*{slope_name}\n"
-        f"R² = {r_squared:.3f}\n"
-        f"SE (Intercept) = {se_intercept:.3f}, SE ({slope_name}) = {se_slope:.3f}\n"
-        f"p-value ({slope_name}) = {p_value:.3e}"
-    )
-    plt.plot([], [], " ", label=f"{equation_text}")
-    plt.legend(fontsize="large")
-    plt.grid(True)
-    plt.show()
+        plt.show()
 
     return results
 
