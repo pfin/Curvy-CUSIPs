@@ -1,18 +1,21 @@
-import itertools
 import logging
 from datetime import datetime
-from typing import Dict, List, Literal, Optional, Tuple, Annotated
+from typing import Dict, List, Optional
+
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import QuantLib as ql
-from joblib import Parallel, delayed
 import tqdm
-from pandas.tseries.offsets import BDay
-from scipy.stats import zscore, tstd
+from joblib import Parallel, delayed
+from scipy.stats import zscore
 from sklearn.decomposition import PCA
 from termcolor import colored
+
+from CurvyCUSIPs.Spectral.R2PCA import R2PCA
 
 
 class PCAGridResiduals:
@@ -727,14 +730,106 @@ class PCAGridResiduals:
 
         residual_zscores = self._calculate_cross_df_zscores(residuals_timeseries_dict)
         return {
-            "evr": pca.explained_variance_ratio_,
+            "pca": pca,
             "loading_df": loadings_df,
             "scores_df": scores_df,
             "reconstructed_df": reconstructed_df,
             "residuals_df": residuals_df,
             "residual_timeseries_dict": residuals_timeseries_dict,
             "rich_cheap_residual_zscore_timeseries_dict": dict(zip(residuals_timeseries_dict.keys(), residual_zscores)),
-            "rich_cheap_zscore_heatmap": residual_zscores[-1],
+        }
+    
+    def __single_r2pca_across_grid_all(
+        self,
+        long_df: pd.DataFrame,
+        n_components: int,
+        run_on_level_changes: bool = False,
+    ):
+        sorted_dates = sorted(long_df.index)
+        data_df = long_df.loc[sorted_dates]  
+
+        X = data_df.values  
+        T_, D_ = X.shape
+        X = X.reshape((1, T_, D_))  
+
+        if run_on_level_changes:
+            X_diff = np.diff(X, axis=1)
+            r2pca = R2PCA(n_components=n_components, window_size=X_diff.shape[1])
+            r2pca.fit(X_diff)
+            changes_transformed = r2pca.transform(X_diff)   
+            changes_recon = r2pca.inverse_transform(changes_transformed)  
+
+            X_recon = np.zeros_like(X)  
+            X_recon[:, 0] = X[:, 0]
+
+            for i in range(1, T_):
+                X_recon[:, i] = X_recon[:, i-1] + changes_recon[:, i-1]
+
+            residuals = X - X_recon
+
+            final_loadings = r2pca.components_[-1]  
+            loading_df = pd.DataFrame(
+                final_loadings,
+                index=[f"PC{i+1}" for i in range(n_components)],
+                columns=data_df.columns,
+            )
+
+            all_scores = changes_transformed[0]  
+            score_idx = sorted_dates[1:]  
+            scores_df = pd.DataFrame(
+                all_scores,
+                index=score_idx,
+                columns=[f"PC{i+1}" for i in range(n_components)],
+            )
+
+        else:
+            r2pca = R2PCA(n_components=n_components, window_size=T_)  
+            r2pca.fit(X)
+            X_transformed = r2pca.transform(X)      
+            X_recon = r2pca.inverse_transform(X_transformed)  
+            residuals = X - X_recon
+
+            final_loadings = r2pca.components_[-1]  
+            loading_df = pd.DataFrame(
+                final_loadings,
+                index=[f"PC{i+1}" for i in range(n_components)],
+                columns=data_df.columns,
+            )
+
+            all_scores = X_transformed[0]  
+            scores_df = pd.DataFrame(
+                all_scores,
+                index=sorted_dates,
+                columns=[f"PC{i+1}" for i in range(n_components)],
+            )
+
+        residuals_df = pd.DataFrame(
+            residuals[0],
+            index=sorted_dates,
+            columns=data_df.columns,
+        )
+
+        residuals_long = residuals_df.stack([self._master_tenor_col, self._melted_var_name]).reset_index()
+        residuals_long.columns = [self._master_date_col, self._master_tenor_col, self._melted_var_name, self._master_residual_col]
+        residuals_timeseries_dict = {}
+        for obs_date, sub_df in residuals_long.groupby(self._master_date_col):
+            pivoted = sub_df.pivot(index=self._master_tenor_col, columns=self._melted_var_name, values=self._master_residual_col).reset_index()
+            pivoted.columns.name = None
+            pivoted["period_temp"] = pivoted[self._master_tenor_col].apply(lambda x: ql.Period(x))
+            pivoted = pivoted.sort_values(by="period_temp").drop(columns=["period_temp"]).reset_index(drop=True).set_index(self._master_tenor_col)
+            pivoted = pivoted[sorted(pivoted.columns, key=lambda x: self._ql_period_wrapper(x))]
+            residuals_timeseries_dict[obs_date] = pivoted * 100
+
+        residual_zscores = self._calculate_cross_df_zscores(residuals_timeseries_dict)
+
+        return {
+            "r2pca_model": r2pca,
+            "loading_df": loading_df,     
+            "scores_df": scores_df,       
+            "reconstructed_df": pd.DataFrame(X_recon[0], index=sorted_dates, columns=data_df.columns),
+            "residuals_df": residuals_df,
+            "residual_timeseries_dict": residuals_timeseries_dict,
+            "rich_cheap_residual_zscore_timeseries_dict": dict(zip(residuals_timeseries_dict.keys(), residual_zscores)),
         }
 
     def runner(
@@ -782,6 +877,9 @@ class PCAGridResiduals:
                 n_jobs=n_jobs or 1,
                 run_on_level_changes=run_on_level_changes,
             )
+        
+        if use_r2_algo:
+            return self.__single_r2pca_across_grid_all(long_df=long_df, n_components=n_components, run_on_level_changes=run_on_level_changes)
 
         if run_on_indy_cols:
             return self.__parallel_individual_cols_all(
@@ -791,28 +889,172 @@ class PCAGridResiduals:
         return self.__single_across_grid_all(long_df=long_df, n_components=n_components, run_on_level_changes=run_on_level_changes)
 
 
-# @staticmethod
-# def pca_residual_timeseries_plotter(
-#     pca_results: Dict,
-#     tenors_to_plot: List[str],
-#     use_plotly: Optional[bool] = False,
-#     key: Optional[str] = "residual_timeseries_dict",
-#     custom_fly_weights: Optional[Annotated[List[float], 3]] = None,
-# ):
-#     tenors_to_plot = list(set(tenors_to_plot))
-#     residuals_df_dict: Dict[datetime, pd.DataFrame] = pca_results[key]
-#     S490Swaps._general_fwd_dict_df_timeseries_plotter(
-#         fwd_dict_df=residuals_df_dict,
-#         tenors_to_plot=tenors_to_plot,
-#         bdates=list([key for key in residuals_df_dict.keys() if residuals_df_dict[key] is not None and not residuals_df_dict[key].empty]),
-#         tqdm_desc="PLOTTING PCA RESIDUAL ZSCORES",
-#         custom_title=f"PCA Residuals: {tenors_to_plot[0] if len(tenors_to_plot) == 0 else ", ".join(tenors_to_plot)}",
-#         yaxis_title="Residuals (bps)",
-#         tenor_is_df_index=True,
-#         use_plotly=use_plotly,
-#         custom_fly_weights=custom_fly_weights,
-#         should_scale=False,
-#     )
+    # @staticmethod
+    # def pca_residual_timeseries_plotter(
+    #     pca_results: Dict,
+    #     tenors_to_plot: List[str],
+    #     use_plotly: Optional[bool] = False,
+    #     key: Optional[str] = "residual_timeseries_dict",
+    #     custom_fly_weights: Optional[Annotated[List[float], 3]] = None,
+    # ):
+    #     tenors_to_plot = list(set(tenors_to_plot))
+    #     residuals_df_dict: Dict[datetime, pd.DataFrame] = pca_results[key]
+    #     S490Swaps._general_fwd_dict_df_timeseries_plotter(
+    #         fwd_dict_df=residuals_df_dict,
+    #         tenors_to_plot=tenors_to_plot,
+    #         bdates=list([key for key in residuals_df_dict.keys() if residuals_df_dict[key] is not None and not residuals_df_dict[key].empty]),
+    #         tqdm_desc="PLOTTING PCA RESIDUAL ZSCORES",
+    #         custom_title=f"PCA Residuals: {tenors_to_plot[0] if len(tenors_to_plot) == 0 else ", ".join(tenors_to_plot)}",
+    #         yaxis_title="Residuals (bps)",
+    #         tenor_is_df_index=True,
+    #         use_plotly=use_plotly,
+    #         custom_fly_weights=custom_fly_weights,
+    #         should_scale=False,
+    #     )
+
+
+    def _timeseries_dict_df_plotter(
+        self,
+        dict_df: Dict[datetime, pd.DataFrame],
+        tenors_to_plot: List[str],
+        bdates: List[pd.Timestamp] | List[datetime],
+        tqdm_desc: str,
+        custom_title: Optional[str] = None,
+        yaxis_title: Optional[str] = None,
+        use_plotly: Optional[bool] = False,
+        should_scale_spreads: Optional[bool] = False,
+    ):
+        dates = []
+        to_plot: Dict[str, List[float]] = {}
+        for bdate in tqdm.tqdm(bdates, desc=tqdm_desc):
+            if not type(bdate) is datetime:
+                bdate: pd.Timestamp = bdate
+                bdate = bdate.to_pydatetime()
+
+            try:
+                curr_df = dict_df[bdate]
+                dates.append(bdate)
+
+                for tenor in tenors_to_plot:
+                    if "-" in tenor:
+                        pass 
+                        # legs = tenor.split("-")
+                        # if len(legs) == 2:
+                        #     leg1, leg2 = legs
+                        #     if tenor not in to_plot:
+                        #         to_plot[tenor] = []
+
+                        #     group1 = leg1.split(" ")
+                        #     group2 = leg2.split(" ")
+                        #     if len(group1) == 3 and len(group2) == 3:
+                        #         implied_fwd1 = " ".join(group1[:2])
+                        #         leg1 = " ".join(group1[2:])
+                        #         implied_fwd2 = " ".join(group2[:2])
+                        #         leg2 = " ".join(group2[2:])
+                        #     else:
+                        #         implied_fwd1 = "Spot"
+                        #         implied_fwd2 = "Spot"
+
+                        #     spread = (
+                        #         curr_df.loc[curr_df["Tenor"] == leg2, implied_fwd2].values[0]
+                        #         - curr_df.loc[curr_df["Tenor"] == leg1, implied_fwd1].values[0]
+                        #     )
+                        #     if should_scale_spreads:
+                        #         spread = spread * 100
+                        #     to_plot[tenor].append(spread)
+                        # elif len(legs) == 3:
+                        #     leg1, leg2, leg3 = legs
+                        #     if tenor not in to_plot:
+                        #         to_plot[tenor] = []
+
+                        #     group1 = leg1.split(" ")
+                        #     group2 = leg2.split(" ")
+                        #     group3 = leg3.split(" ")
+                        #     if len(group1) == 3 and len(group2) == 3:
+                        #         implied_fwd1 = " ".join(group1[:2])
+                        #         leg1 = " ".join(group1[2:])
+                        #         implied_fwd2 = " ".join(group2[:2])
+                        #         leg2 = " ".join(group2[2:])
+                        #         implied_fwd3 = " ".join(group3[:2])
+                        #         leg3 = " ".join(group3[2:])
+                        #     else:
+                        #         implied_fwd1 = "Spot"
+                        #         implied_fwd2 = "Spot"
+                        #         implied_fwd3 = "Spot"
+
+                        #     spread = (
+                        #         curr_df.loc[curr_df["Tenor"] == leg2, implied_fwd2].values[0]
+                        #         - curr_df.loc[curr_df["Tenor"] == leg1, implied_fwd1].values[0]
+                        #         - curr_df.loc[curr_df["Tenor"] == leg3, implied_fwd3].values[0]
+                        #         - curr_df.loc[curr_df["Tenor"] == leg2, implied_fwd2].values[0]
+                        #     )
+                        #     to_plot[tenor].append(spread)
+                        # else:
+                        #     raise ValueError("Bad tenor passed in")
+                    else:
+                        groups = tenor.split(" ")
+                        if len(groups) == 3:
+                            fwd_tenor = tenor
+                            if fwd_tenor not in to_plot:
+                                to_plot[fwd_tenor] = []
+                            to_plot[fwd_tenor].append(curr_df.loc[curr_df["Tenor"] == " ".join(groups[2:]), " ".join(groups[:2])].values[0])
+                        else:
+                            if tenor not in to_plot:
+                                to_plot[tenor] = []
+                            to_plot[tenor].append(curr_df.loc[curr_df["Tenor"] == tenor, "Spot"].values[0])
+
+            except Exception as e:
+                self._logger.error(f"{tqdm_desc} Timeseries plotter had an error at {bdate}: {e}")
+
+        if use_plotly:
+            fig = go.Figure()
+            for tenor, rates in to_plot.items():
+                fig.add_trace(go.Scatter(x=dates, y=rates, mode="lines", name=tenor))
+            fig.update_layout(
+                title=custom_title or "SOFR OIS Plot",
+                xaxis_title="Date",
+                yaxis_title=yaxis_title or "bps",
+                legend_title="Tenors",
+                font=dict(size=11),
+                template="plotly_dark",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                height=750,
+            )
+            fig.update_xaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikemode="across", showgrid=True)
+            fig.update_yaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikethickness=0.5, showgrid=True)
+            fig.show(
+                config={
+                    "modeBarButtonsToAdd": [
+                        "drawline",
+                        "drawopenpath",
+                        "drawclosedpath",
+                        "drawcircle",
+                        "drawrect",
+                        "eraseshape",
+                    ]
+                }
+            )
+        else:
+            for tenor, rates in to_plot.items():
+                plt.plot(
+                    dates,
+                    rates,
+                    label=tenor,
+                )
+
+            ax = plt.gca()
+            locator = mdates.AutoDateLocator(minticks=10, maxticks=20)
+            formatter = mdates.DateFormatter("%Y-%m-%d")
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(formatter)
+
+            plt.xlabel("Date")
+            plt.ylabel(yaxis_title or "bps")
+            plt.title(custom_title or "SOFR OIS Plot")
+            plt.legend(fontsize="large")
+            plt.grid(True)
+            plt.xticks(rotation=15)
+            plt.show()
 
 
 # @staticmethod
