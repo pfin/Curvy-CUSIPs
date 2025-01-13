@@ -190,112 +190,116 @@ class S490Swaptions:
             fig.show()
 
         for bdate in bdates:
-            # Expiry-Tail surface
-            if not tail and not expiry:
-                if strike_offset == 0:
-                    vol_surface_df = pd.DataFrame(self.s490_atm_vol_timeseries_db.get(bdate.strftime("%Y-%m-%d")))
+            try:
+                # Expiry-Tail surface
+                if not tail and not expiry:
+                    if strike_offset == 0:
+                        vol_surface_df = pd.DataFrame(self.s490_atm_vol_timeseries_db.get(bdate.strftime("%Y-%m-%d")))
+                    else:
+                        strike_offset = str(strike_offset)
+                        vol_surface_df = pd.DataFrame(self.s490_vol_cube_timeseries_db.get(bdate.strftime("%Y-%m-%d"))[strike_offset])
+
+                    vol_surface_df = vol_surface_df.rename(columns={"Option Tenor": "Expiry"})
+                    vol_surface_df = vol_surface_df.set_index("Expiry")
+                    vol_surface_dict[bdate] = vol_surface_df
+
+                    if plot_surfaces:
+                        vol_surface_df = vol_surface_df.iloc[::-1].T
+                        if use_ploty:
+                            plotly_vol_surface_plotter(
+                                vol_surface_df,
+                                f"{bdate.date()} ATM {"+" + str(strike_offset) if strike_offset > 0 else strike_offset} Expiry-Tail Vol Surface",
+                                "Tail",
+                                "Expiry",
+                                "Normal Vol",
+                            )
+                        else:
+                            matplotlib_vol_surface_plotter(
+                                vol_surface_df,
+                                f"{bdate.date()} ATM {"+" + str(strike_offset) if strike_offset > 0 else strike_offset} Expiry-Tail Vol Surface",
+                                "Tail",
+                                "Expiry",
+                                "Normal Vol",
+                            )
+
+                # Expiry-Strike Surface
+                elif tail and not expiry:
+                    vol_cube: Dict[str, List[Dict[str, float]]] = self.s490_vol_cube_timeseries_db.get(bdate.strftime("%Y-%m-%d"))
+                    expiry_strike_surface = []
+                    for curr_strike_offset, expiry_tail_surface in vol_cube.items():
+                        for expiry_vol_dict in expiry_tail_surface:
+                            expiry_strike_surface.append(
+                                {
+                                    "Strike": curr_strike_offset,
+                                    "Expiry": expiry_vol_dict["Option Tenor"],
+                                    "Normal Vol": expiry_vol_dict[tail],
+                                }
+                            )
+
+                    vol_surface_df = pd.DataFrame(expiry_strike_surface)
+                    vol_surface_df["Strike"] = pd.to_numeric(vol_surface_df["Strike"])
+                    vol_surface_df = vol_surface_df.sort_values(by=["Strike"])
+                    vol_surface_df = vol_surface_df.pivot(index="Strike", columns="Expiry", values="Normal Vol").dropna(axis="columns")
+                    vol_surface_df = vol_surface_df[sorted(vol_surface_df.columns, key=lambda x: ql.Period(x))]
+                    vol_surface_dict[bdate] = vol_surface_df
+
+                    if plot_surfaces:
+                        vol_surface_df = vol_surface_df.T
+                        if use_ploty:
+                            plotly_vol_surface_plotter(
+                                vol_surface_df,
+                                f"{bdate.date()} {tail} Tail, Expiry-Strike Vol Surface",
+                                "ATM Strike Offsets",
+                                "Expiry",
+                                "Normal Vol",
+                            )
+                        else:
+                            matplotlib_vol_surface_plotter(
+                                vol_surface_df,
+                                f"{bdate.date()} {tail} Tail, Expiry-Strike Vol Surface",
+                                "ATM Strike Offsets",
+                                "Expiry",
+                                "Normal Vol",
+                            )
+
+                # Tail-Strike Surface
+                elif expiry and not tail:
+                    vol_cube: Dict[str, List[Dict[str, float]]] = self.s490_vol_cube_timeseries_db.get(bdate.strftime("%Y-%m-%d"))
+                    expiry_strike_surface = []
+                    for curr_strike_offset, expiry_tail_surface in vol_cube.items():
+                        for expiry_vol_dict in expiry_tail_surface:
+                            if expiry == expiry_vol_dict["Option Tenor"]:
+                                expiry_vol_dict_copy = expiry_vol_dict.copy()
+                                del expiry_vol_dict_copy["Option Tenor"]
+                                expiry_strike_surface.append({"Strike": curr_strike_offset} | expiry_vol_dict_copy)
+
+                    vol_surface_df = pd.DataFrame(expiry_strike_surface)
+                    vol_surface_dict[bdate] = vol_surface_df
+
+                    if plot_surfaces:
+                        vol_surface_df = vol_surface_df.set_index("Strike")
+                        vol_surface_df = vol_surface_df.T
+                        if use_ploty:
+                            plotly_vol_surface_plotter(
+                                vol_surface_df,
+                                f"{bdate.date()} {expiry} Expiry, Tail-Strike Vol Surface",
+                                "ATM Strike Offsets",
+                                "Tail",
+                                "Normal Vol",
+                            )
+                        else:
+                            matplotlib_vol_surface_plotter(
+                                vol_surface_df,
+                                f"{bdate.date()} {expiry} Expiry, Tail-Strike Vol Surface",
+                                "ATM Strike Offsets",
+                                "Tail",
+                                "Normal Vol",
+                            )
                 else:
-                    strike_offset = str(strike_offset)
-                    vol_surface_df = pd.DataFrame(self.s490_vol_cube_timeseries_db.get(bdate.strftime("%Y-%m-%d"))[strike_offset])
-
-                vol_surface_df = vol_surface_df.rename(columns={"Option Tenor": "Expiry"})
-                vol_surface_df = vol_surface_df.set_index("Expiry")
-                vol_surface_dict[bdate] = vol_surface_df
-
-                if plot_surfaces:
-                    vol_surface_df = vol_surface_df.iloc[::-1].T
-                    if use_ploty:
-                        plotly_vol_surface_plotter(
-                            vol_surface_df,
-                            f"{bdate.date()} ATM {"+" + str(strike_offset) if strike_offset > 0 else strike_offset} Expiry-Tail Vol Surface",
-                            "Tail",
-                            "Expiry",
-                            "Normal Vol",
-                        )
-                    else:
-                        matplotlib_vol_surface_plotter(
-                            vol_surface_df,
-                            f"{bdate.date()} ATM {"+" + str(strike_offset) if strike_offset > 0 else strike_offset} Expiry-Tail Vol Surface",
-                            "Tail",
-                            "Expiry",
-                            "Normal Vol",
-                        )
-
-            # Expiry-Strike Surface
-            elif tail and not expiry:
-                vol_cube: Dict[str, List[Dict[str, float]]] = self.s490_vol_cube_timeseries_db.get(bdate.strftime("%Y-%m-%d"))
-                expiry_strike_surface = []
-                for curr_strike_offset, expiry_tail_surface in vol_cube.items():
-                    for expiry_vol_dict in expiry_tail_surface:
-                        expiry_strike_surface.append(
-                            {
-                                "Strike": curr_strike_offset,
-                                "Expiry": expiry_vol_dict["Option Tenor"],
-                                "Normal Vol": expiry_vol_dict[tail],
-                            }
-                        )
-
-                vol_surface_df = pd.DataFrame(expiry_strike_surface)
-                vol_surface_df["Strike"] = pd.to_numeric(vol_surface_df["Strike"])
-                vol_surface_df = vol_surface_df.sort_values(by=["Strike"])
-                vol_surface_df = vol_surface_df.pivot(index="Strike", columns="Expiry", values="Normal Vol").dropna(axis="columns")
-                vol_surface_df = vol_surface_df[sorted(vol_surface_df.columns, key=lambda x: ql.Period(x))]
-                vol_surface_dict[bdate] = vol_surface_df
-
-                if plot_surfaces:
-                    vol_surface_df = vol_surface_df.T
-                    if use_ploty:
-                        plotly_vol_surface_plotter(
-                            vol_surface_df,
-                            f"{bdate.date()} {tail} Tail, Expiry-Strike Vol Surface",
-                            "ATM Strike Offsets",
-                            "Expiry",
-                            "Normal Vol",
-                        )
-                    else:
-                        matplotlib_vol_surface_plotter(
-                            vol_surface_df,
-                            f"{bdate.date()} {tail} Tail, Expiry-Strike Vol Surface",
-                            "ATM Strike Offsets",
-                            "Expiry",
-                            "Normal Vol",
-                        )
-
-            # Tail-Strike Surface
-            elif expiry and not tail:
-                vol_cube: Dict[str, List[Dict[str, float]]] = self.s490_vol_cube_timeseries_db.get(bdate.strftime("%Y-%m-%d"))
-                expiry_strike_surface = []
-                for curr_strike_offset, expiry_tail_surface in vol_cube.items():
-                    for expiry_vol_dict in expiry_tail_surface:
-                        if expiry == expiry_vol_dict["Option Tenor"]:
-                            expiry_vol_dict_copy = expiry_vol_dict.copy()
-                            del expiry_vol_dict_copy["Option Tenor"]
-                            expiry_strike_surface.append({"Strike": curr_strike_offset} | expiry_vol_dict_copy)
-
-                vol_surface_df = pd.DataFrame(expiry_strike_surface)
-                vol_surface_dict[bdate] = vol_surface_df
-
-                if plot_surfaces:
-                    vol_surface_df = vol_surface_df.set_index("Strike")
-                    vol_surface_df = vol_surface_df.T
-                    if use_ploty:
-                        plotly_vol_surface_plotter(
-                            vol_surface_df,
-                            f"{bdate.date()} {expiry} Expiry, Tail-Strike Vol Surface",
-                            "ATM Strike Offsets",
-                            "Tail",
-                            "Normal Vol",
-                        )
-                    else:
-                        matplotlib_vol_surface_plotter(
-                            vol_surface_df,
-                            f"{bdate.date()} {expiry} Expiry, Tail-Strike Vol Surface",
-                            "ATM Strike Offsets",
-                            "Tail",
-                            "Normal Vol",
-                        )
-            else:
-                print("Bad params mate...")
+                    raise ValueError(f"Bad Params for {bdate}: {tail}, {expiry}")
+                
+            except Exception as e:
+                self._logger.error(f"'get_vol_surfaces' Error at {bdate}: {e}")
 
         return vol_surface_dict
 
@@ -356,7 +360,7 @@ class S490Swaptions:
 
         dfs = []
         if plot_timeseries:
-            plt.figure(figsize=(12, 8))
+            plt.figure()
             default_title = []
             for tenor, strike_offset in tenor_strike_pairs:
                 key = self._format_swaption_tenor_key(tenor, strike_offset)
@@ -422,9 +426,16 @@ class S490Swaptions:
             100: self.get_vol_surfaces(date=date, strike_offset=100)[date],
             200: self.get_vol_surfaces(date=date, strike_offset=200)[date],
         }
+    
+    def get_ql_vol_cube_handle(
+        self,
+        date: Optional[datetime] = None,
+        vol_cube_dict: Optional[Dict[Literal[-200, -100, -50, -25, -10, 0, 10, 25, 50, 100, 200], pd.DataFrame]] = None,
+    ) -> ql.SwaptionVolatilityStructureHandle:
+        if not vol_cube_dict:
+            assert date
+            vol_cube_dict = self.get_vol_cube(date=date)
 
-    def get_ql_vol_cube_handle(self, date: datetime) -> ql.SwaptionVolatilityStructureHandle:
-        vol_cube_dict = self.get_vol_cube(date=date)
         atm_vol_surface = vol_cube_dict[0]
         atm_vol_surface = atm_vol_surface.drop("9M")
 
