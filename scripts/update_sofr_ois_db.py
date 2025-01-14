@@ -103,6 +103,7 @@ if __name__ == "__main__":
 
         start_date = datetime(2018, 1, 1)
         end_date = (datetime.today() - BDay(1)).to_pydatetime()
+        print_sofr_fixing_rates_df = True 
         
     else:
         if len(sys.argv) >= 2 and sys.argv[1] == "use_today":

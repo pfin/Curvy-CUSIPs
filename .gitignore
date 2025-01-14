@@ -199,3 +199,7 @@ yield_curve_monkey_atm_vol_grid_markings_db-shm
 yield_curve_monkey_atm_vol_grid_markings_db-wal
 
 /tastytrade
+.aider*
+
+repomix-output.txt
+/db
