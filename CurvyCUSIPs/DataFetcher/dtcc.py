@@ -59,6 +59,14 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
             info_verbose=info_verbose,
             error_verbose=error_verbose,
         )
+        # Convert proxies to httpx format
+        self._httpx_proxies = None
+        if proxies:
+            self._httpx_proxies = {
+                "http://": proxies.get('http', None),
+                "https://": proxies.get('https', None)
+            }
+        
         self._anna_dsb_swaps_lookup_table_df = self._fetch_anna_dsb_upi_lookup_df("SWAP")
         self._anna_dsb_swaption_lookup_table_df = self._fetch_anna_dsb_upi_lookup_df("SWAPTION")
 
@@ -106,11 +114,12 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
         if (agency == "SEC" and asset_class == "COMMODITIES") or (agency == "SEC" and asset_class == "FOREX"):
             raise ValueError(f"SEC DOES NOT STORE {asset_class} IN THEIR SDR")
 
-        dtcc_url = f"https://kgc0418-tdw-data-0.s3.amazonaws.com/{agency.lower()}/eod/{agency.upper()}_CUMULATIVE_{asset_class.upper()}_{date.strftime("%Y_%m_%d")}.zip"
+        dtcc_url = f"https://kgc0418-tdw-data-0.s3.amazonaws.com/{agency.lower()}/eod/{agency.upper()}_CUMULATIVE_{asset_class.upper()}_{date.strftime('%Y_%m_%d')}.zip"
+        
         dtcc_header = {
             "authority": "pddata.dtcc.com",
             "method": "GET",
-            "path": f"/{agency.upper()}_CUMULATIVE_{asset_class.upper()}_{date.strftime("%Y_%m_%d")}",
+            "path": f"/{agency.upper()}_CUMULATIVE_{asset_class.upper()}_{date.strftime('%Y_%m_%d')}",
             "scheme": "https",
             "accept": "application/json, text/plain, */*",
             "accept-encoding": "gzip, deflate, br, zstd",
@@ -150,6 +159,8 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
                         follow_redirects=True,
                         timeout=self._global_timeout,
                     ) as response:
+                        print(f"URL: {dtcc_sdr_url}")
+                        print(f"Status: {response.status_code}")
                         response.raise_for_status()
                         zip_buffer = BytesIO()
                         async for chunk in response.aiter_bytes():
@@ -214,73 +225,19 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
         else:
             raise ValueError("Filename does not contain a valid date.")
 
-    def _extract_excel_from_zip(self, zip_buffer, convert_key_into_dt=False, parallelize=False, max_extraction_workers=None):
+    def _extract_excel_from_zip(self, zip_buffer) -> pd.DataFrame:
+        """Extract first CSV/Excel file from zip and return as DataFrame."""
         if not zip_buffer:
-            return {}
+            return pd.DataFrame()
 
         with zipfile.ZipFile(zip_buffer) as zip_file:
-            allowed_extensions = (".xlsx", ".xls", ".csv")
-            matching_files = [
-                info.filename for info in zip_file.infolist() if not info.is_dir() and info.filename.lower().endswith(allowed_extensions)
-            ]
-            if not matching_files:
-                raise FileNotFoundError("No Excel or CSV file found in the ZIP archive.")
-
-            if parallelize:
-                with ThreadPoolExecutor(max_workers=max_extraction_workers) as executor:
-                    file_data = []
-                    for file_name in matching_files:
-                        with zip_file.open(file_name) as f:
-                            buffer = BytesIO(f.read())
-                            file_data.append((buffer, file_name, convert_key_into_dt))
-
-                    results = list(executor.map(self._read_file, file_data))
-
-                return {key: df for result in results if result is not None for key, df in [result]}
-
-            else:
-                dataframes = {}
-                for file_name in matching_files:
-                    with zip_file.open(file_name) as file:
-                        with warnings.catch_warnings():
-                            warnings.simplefilter("ignore", DtypeWarning)
-
-                            if file_name.lower().endswith((".xlsx", ".xls")):
-                                df = pd.read_excel(file)
-                            elif file_name.lower().endswith(".csv"):
-                                df = pd.read_csv(file)
-                            else:
-                                self._logger.debug(f"DTCC - Skipping {file_name}")
-                                continue
-
-                            if convert_key_into_dt:
-                                dataframes[self._parse_dtc_filename_to_datetime(file_name.split(".")[0])] = df
-                            else:
-                                dataframes[file_name] = df
-
-                return dataframes
-
-    async def _fetch_dtcc_sdr_and_extract_excel(
-        self,
-        semaphore: asyncio.Semaphore,
-        client: httpx.AsyncClient,
-        date: datetime,
-        agency: Literal["CFTC", "SEC"],
-        asset_class: Literal["COMMODITIES", "CREDITS", "EQUITIES", "FOREX", "RATES"],
-        parallelize: int = False,
-        max_extraction_workers=None,
-    ):
-        async with semaphore:
-            zip_buffer = await self._fetch_dtcc_sdr_data_helper(client, date, agency, asset_class)
-
-        if parallelize:
-            loop = asyncio.get_event_loop()
-            with ThreadPoolExecutor(max_workers=max_extraction_workers) as pool:
-                df = await loop.run_in_executor(pool, self._extract_excel_from_zip, zip_buffer, True, True, max_extraction_workers)
-            return df
-        else:
-            df = await asyncio.to_thread(self._extract_excel_from_zip, zip_buffer, True, parallelize, max_extraction_workers)
-            return df
+            for info in zip_file.infolist():
+                if info.filename.endswith(('.csv', '.xlsx', '.xls')):
+                    with zip_file.open(info) as f:
+                        if info.filename.endswith('.csv'):
+                            return pd.read_csv(f)
+                        return pd.read_excel(f)
+        return pd.DataFrame()
 
     def fetch_dtcc_sdr_data_timeseries(
         self,
@@ -297,66 +254,63 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
 
         bdates = pd.date_range(start=start_date, end=end_date, freq=CustomBusinessDay(calendar=USFederalHolidayCalendar()))
 
-        async def build_tasks(
-            client: httpx.AsyncClient,
-            dates: List[datetime],
-            agency: Literal["CFTC", "SEC"],
-            asset_class: Literal["COMMODITIES", "CREDITS", "EQUITIES", "FOREX", "RATES"],
-            parallelize: bool,
-            max_extraction_workers: int,
-        ):
-            tasks = []
-            semaphore = asyncio.Semaphore(max_concurrent_tasks)
-            for date in dates:
-                task = asyncio.create_task(
-                    self._fetch_dtcc_sdr_and_extract_excel(
-                        semaphore=semaphore,
-                        client=client,
-                        date=date,
-                        agency=agency,
-                        asset_class=asset_class,
-                        parallelize=parallelize,
-                        max_extraction_workers=max_extraction_workers,
-                    )
-                )
-                tasks.append(task)
-
-            return await tqdm.asyncio.tqdm.gather(*tasks, desc="FETCHING DTCC SDR DATASETS...")
-
-        async def run_fetch_all(
-            dates: List[datetime],
-            agency: Literal["CFTC", "SEC"],
-            asset_class: Literal["COMMODITIES", "CREDITS", "EQUITIES", "FOREX", "RATES"],
-            parallelize: bool,
-            max_extraction_workers: int,
-        ):
+        async def run_fetch():
             limits = httpx.Limits(
                 max_connections=max_concurrent_tasks,
                 max_keepalive_connections=max_keepalive_connections,
             )
-            async with httpx.AsyncClient(limits=limits, proxies=self._httpx_proxies) as client:
-                all_data = await build_tasks(
-                    client=client,
-                    dates=dates,
-                    agency=agency,
-                    asset_class=asset_class,
-                    parallelize=parallelize,
-                    max_extraction_workers=max_extraction_workers,
-                )
-                return all_data
+            async with httpx.AsyncClient(limits=limits) as client:
+                tasks = []
+                for date in bdates:
+                    task = self._fetch_dtcc_sdr_data_helper(client, date, agency, asset_class)
+                    tasks.append(task)
+                return await asyncio.gather(*tasks)
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DtypeWarning)
-            results: List[Tuple[str, pd.DataFrame]] = asyncio.run(
-                run_fetch_all(
-                    dates=bdates, agency=agency, asset_class=asset_class, parallelize=parallelize, max_extraction_workers=max_extraction_workers
-                )
+        # Get zip files and convert directly to DataFrames
+        zip_buffers = asyncio.run(run_fetch())
+        
+        # Process into date->DataFrame mapping
+        data_dict = {}
+        for date, zip_buffer in zip(bdates, zip_buffers):
+            if zip_buffer:
+                df = self._extract_excel_from_zip(zip_buffer)
+                if not df.empty:
+                    data_dict[date] = df
+                
+        return data_dict
+
+    async def run_fetch_all(
+        self,
+        dates: List[datetime],
+        agency: Literal["CFTC", "SEC"],
+        asset_class: Literal["COMMODITIES", "CREDITS", "EQUITIES", "FOREX", "RATES"],
+        parallelize: bool,
+        max_extraction_workers: int,
+    ):
+        limits = httpx.Limits(
+            max_connections=self._max_concurrent_tasks,
+            max_keepalive_connections=self._max_keepalive_connections,
+        )
+        
+        # Use proper httpx proxy format
+        transport = None
+        if self._httpx_proxies:
+            transport = httpx.AsyncHTTPTransport(proxy=self._httpx_proxies.get("http://"))
+            
+        async with httpx.AsyncClient(
+            limits=limits,
+            transport=transport,
+            timeout=self._global_timeout
+        ) as client:
+            all_data = await self.build_tasks(
+                client=client,
+                dates=dates,
+                agency=agency,
+                asset_class=asset_class,
+                parallelize=parallelize,
+                max_extraction_workers=max_extraction_workers,
             )
-            if results is None or len(results) == 0:
-                print('"fetch_dtcc_sdr_data_timeseries" --- empty results') if verbose else None
-                return {}
-
-            return reduce(lambda a, b: a | b, results)
+            return all_data
 
     def fetch_historical_swaps_term_structure(
         self,
@@ -954,15 +908,11 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
             max_extraction_workers=max_extraction_workers,
         )
 
-        if sdr_time_and_sales_dict is None or len(sdr_time_and_sales_dict.keys()) == 0:
+        if not sdr_time_and_sales_dict:
             self._logger.debug('"fetch_historical_swaps_term_structure" --- SDR Time and Sales Data is Empty')
-            print('"fetch_historical_swaps_term_structure" --- SDR Time and Sales Data is Empty') if verbose else None
             return {}
 
-        swaption_time_and_sales_df_dict: Dict[
-            datetime,
-            pd.DataFrame,
-        ] = {}
+        swaption_time_and_sales_df_dict = {}
 
         underlying_upi_lookup_df = self._anna_dsb_swaps_lookup_table_df
         UNDERLYING_UPIS = underlying_upi_lookup_df[

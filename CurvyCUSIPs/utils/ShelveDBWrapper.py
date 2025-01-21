@@ -3,15 +3,28 @@ import os
 
 class ShelveDBWrapper:
     def __init__(self, db_path, create=False):
+        """Initialize shelve database wrapper.
+        
+        Args:
+            db_path: Path to the shelve database (without extensions)
+            create: If True, create new database if it doesn't exist
+        """
         self.db_path = db_path
         self.db = None
+        
+        # Only check if database exists when not creating
         if not create:
-            if not os.path.exists(self.db_path):
-                raise ValueError("DB does not exist")
+            try:
+                # Try opening briefly to check existence
+                with shelve.open(db_path, flag='r') as _:
+                    pass
+            except:
+                raise ValueError(f"Database does not exist at {db_path}")
 
     def open(self):
         """Open the shelve database."""
         self.db = shelve.open(self.db_path)
+        return self.db
 
     def close(self):
         """Close the shelve database."""

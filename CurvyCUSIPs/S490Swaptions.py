@@ -16,6 +16,7 @@ from functools import reduce
 
 from CurvyCUSIPs.S490Swaps import S490Swaps
 from CurvyCUSIPs.utils.ShelveDBWrapper import ShelveDBWrapper
+from CurvyCUSIPs.CurveDataFetcher import CurveDataFetcher
 
 JSON: TypeAlias = dict[str, "JSON"] | list["JSON"] | str | int | float | bool | None
 
@@ -36,46 +37,52 @@ class S490Swaptions:
     def __init__(
         self,
         s490_swaps: S490Swaps,
-        atm_vol_timeseries_db_path=r"..\db\s490_swaption_atm_vol",
-        s490_vol_cube_timeseries_db_path=r"..\db\s490_swaption_vol_cube",
+        atm_vol_timeseries_db_path=None,
+        s490_vol_cube_timeseries_db_path=None,
         debug_verbose: Optional[bool] = False,
         info_verbose: Optional[bool] = False,
         error_verbose: Optional[bool] = False,
     ):
         self.s490_swaps = s490_swaps
-        self.s490_atm_vol_timeseries_db = self.setup_db(atm_vol_timeseries_db_path)
-        self.s490_vol_cube_timeseries_db = self.setup_db(s490_vol_cube_timeseries_db_path)
+        
+        if atm_vol_timeseries_db_path:
+            self.s490_atm_vol_timeseries_db = self.setup_db(atm_vol_timeseries_db_path)
+        else:
+            self.s490_atm_vol_timeseries_db = None
+            
+        if s490_vol_cube_timeseries_db_path:
+            self.s490_vol_cube_timeseries_db = self.setup_db(s490_vol_cube_timeseries_db_path)
+        else:
+            self.s490_vol_cube_timeseries_db = None
 
         self._debug_verbose = debug_verbose
         self._error_verbose = error_verbose
         self._info_verbose = info_verbose
         self._no_logs_plz = not debug_verbose and not error_verbose and not info_verbose
-
         self._setup_logger()
 
-    def setup_db(self, path: str, create=False):
-        db = ShelveDBWrapper(path, create=create)
-        db.open()
-
-        if len(db.keys()) == 0:
-            print(
-                colored(
-                    f"Warning: {path} is empty",
-                    "yellow",
-                )
-            )
-        else:
-            most_recent_db_dt = datetime.strptime(max(db.keys()), "%Y-%m-%d")
-            self._logger.info(f"Most recent date in db: {most_recent_db_dt}")
-            if ((datetime.today() - BDay(1)) - most_recent_db_dt).days >= 1:
-                print(
-                    colored(
-                        f"{path} is behind --- cd into 'scripts' and run 'update_atm_swaption_vol.py' to update --- most recent date in db: {most_recent_db_dt}",
-                        "yellow",
+    def setup_db(self, db_path: str, create=False):
+        """Setup shelve database with proper path handling."""
+        try:
+            db = ShelveDBWrapper(db_path, create=create)
+            db.open()
+            
+            if len(db.keys()) == 0:
+                print(colored(f"Warning: {db_path} is empty", "yellow"))
+            else:
+                most_recent_db_dt = datetime.strptime(max(db.keys()), "%Y-%m-%d")
+                self._logger.info(f"Most recent date in db: {most_recent_db_dt}")
+                if ((datetime.today() - BDay(1)) - most_recent_db_dt).days >= 1:
+                    print(
+                        colored(
+                            f"{db_path} is behind --- cd into 'scripts' and run update script to update --- most recent date in db: {most_recent_db_dt}",
+                            "yellow",
+                        )
                     )
-                )
-
-        return db
+            return db
+        except Exception as e:
+            self._logger.error(f"Failed to setup database at {db_path}: {str(e)}")
+            raise
 
     def _setup_logger(self):
         if not self._logger.hasHandlers():
@@ -480,3 +487,82 @@ class S490Swaptions:
         )
 
         return ql_vol_cube_handle
+
+    def create_s490_swaption_time_and_sales(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        data_fetcher: CurveDataFetcher,
+        model: Literal["normal", "lognormal"] = "normal",
+    ) -> Tuple[Dict[datetime, pd.DataFrame], Dict[datetime, Dict[str, float]], Dict[datetime, ql.YieldTermStructure]]:
+        """Fetch and process swaption time and sales data."""
+        try:
+            # Fetch swaption trades from DTCC
+            swaption_time_and_sales_dict = data_fetcher.dtcc_sdr_fetcher.fetch_historical_swaption_time_and_sales(
+                start_date=start_date,
+                end_date=end_date,
+                underlying_swap_types=["Fixed_Float_OIS"],
+                underlying_reference_floating_rates=[
+                    "USD-SOFR-OIS Compound",
+                    "USD-SOFR-COMPOUND", 
+                    "USD-SOFR",
+                    "USD-SOFR Compounded Index",
+                    "USD-SOFR CME Term"
+                ],
+                underlying_ccy="USD",
+                underlying_reference_floating_rate_term_value=1,
+                underlying_reference_floating_rate_term_unit="DAYS",
+                underlying_notional_schedule="Constant",
+                underlying_delivery_types=["CASH", "PHYS"],
+                swaption_exercise_styles=["European"]
+            )
+
+            # Process results
+            close_premium_dict = {}
+            ql_curves_dict = {}
+            
+            for date in swaption_time_and_sales_dict.keys():
+                try:
+                    ql_curve = self.s490_swaps.get_ql_term_structure(date)
+                    ql_curves_dict[date] = ql_curve
+                    
+                    close_premium = self._calculate_closing_premium(
+                        swaption_time_and_sales_dict[date],
+                        ql_curve,
+                        model
+                    )
+                    close_premium_dict[date] = close_premium
+                    
+                except Exception as e:
+                    self._logger.error(f"Error processing date {date}: {str(e)}")
+                    continue
+
+            return swaption_time_and_sales_dict, close_premium_dict, ql_curves_dict
+            
+        except Exception as e:
+            self._logger.error(f"Failed to fetch swaption data: {str(e)}")
+            raise
+
+    def _calculate_closing_premium(
+        self,
+        trades_df: pd.DataFrame,
+        ql_curve: ql.YieldTermStructure,
+        model: str
+    ) -> Dict[str, float]:
+        """Calculate closing premium values from trades.
+        
+        Helper method for create_s490_swaption_time_and_sales.
+        """
+        # Group trades by option/underlying tenor pair
+        grouped = trades_df.groupby(['Option Tenor', 'Underlying Tenor'])
+        
+        premiums = {}
+        for (opt_tenor, und_tenor), group in grouped:
+            key = f"{opt_tenor}x{und_tenor}"
+            
+            # Use last trade of the day as closing premium
+            if not group.empty:
+                last_trade = group.iloc[-1]
+                premiums[key] = float(last_trade['Option Premium per Notional'])
+                
+        return premiums

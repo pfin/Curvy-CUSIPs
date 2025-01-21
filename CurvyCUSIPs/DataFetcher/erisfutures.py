@@ -104,7 +104,7 @@ class ErisFuturesDataFetcher(DataFetcherBase):
     ):
         td = datetime.today() - date
         archives_path = f"archives/{date.year}/{date.month:02}-{calendar.month_name[date.month]}"
-        file_name = f"Eris_{date.strftime("%Y%m%d")}_{workbook_type}.csv"
+        file_name = f"Eris_{date.strftime('%Y%m%d')}_{workbook_type}.csv"
         if td.days < 90:
             eris_ftp_formatted_url = f"{self.eris_ftp_urls}/{file_name}"
         else:
@@ -181,12 +181,81 @@ class ErisFuturesDataFetcher(DataFetcherBase):
         workbook_type: Literal["EOD_ParCouponCurve_SOFR"],
     ):
         async with semaphore:
-            buffer, file_name = await self._fetch_eris_ftp_files_helper(client=client, date=date, workbook_type=workbook_type)
+            buffer, file_name = await self._fetch_eris_ftp_files_helper(
+                client=client, 
+                date=date, 
+                workbook_type=workbook_type
+            )
             if not buffer or not file_name:
                 return None, None
 
         key, df = await asyncio.to_thread(self._read_file, buffer, file_name)
         return key, df
+
+    async def build_tasks(
+        self,
+        client: httpx.AsyncClient,
+        dates: List[datetime],
+        max_concurrent_tasks: int,
+        workbook_type: Literal["EOD_ParCouponCurve_SOFR"],
+    ):
+        tasks = []
+        semaphore = asyncio.Semaphore(max_concurrent_tasks)
+        for date in dates:
+            task = asyncio.create_task(
+                self._fetch_and_read_eris_ftp_file(
+                    semaphore=semaphore,
+                    client=client,
+                    date=date,
+                    workbook_type=workbook_type,
+                )
+            )
+            tasks.append(task)
+
+        return await tqdm.asyncio.tqdm.gather(*tasks, desc="FETCHING ERIS FTP Files...")
+
+    async def run_fetch_all(
+        self,
+        dates: List[datetime],
+        max_concurrent_tasks: int,
+        max_keepalive_connections: int,
+        workbook_type: Literal["EOD_ParCouponCurve_SOFR"],
+    ):
+        # Configure httpx client with proper settings
+        limits = httpx.Limits(
+            max_connections=max_concurrent_tasks,
+            max_keepalive_connections=max_keepalive_connections,
+            keepalive_expiry=30.0  # Added explicit keepalive expiry
+        )
+        
+        # Configure transport with proper proxy settings if needed
+        transport = None
+        if self._httpx_proxies:
+            proxies = {}
+            for scheme, proxy_url in self._httpx_proxies.items():
+                if scheme in ('http', 'https'):
+                    proxies[f"{scheme}://"] = proxy_url
+            if proxies:
+                transport = httpx.AsyncHTTPTransport(
+                    proxies=proxies,
+                    retries=3,  # Added retry configuration
+                    verify=False
+                )
+            
+        async with httpx.AsyncClient(
+            limits=limits,
+            transport=transport,
+            verify=False,
+            timeout=httpx.Timeout(30.0),  # Added explicit timeout
+            follow_redirects=True
+        ) as client:
+            all_data = await self.build_tasks(
+                client=client,
+                dates=dates,
+                max_concurrent_tasks=max_concurrent_tasks,
+                workbook_type=workbook_type,
+            )
+            return all_data
 
     def fetch_eris_ftp_timeseries(
         self,
@@ -195,48 +264,41 @@ class ErisFuturesDataFetcher(DataFetcherBase):
         workbook_type: Literal["EOD_ParCouponCurve_SOFR"] = "EOD_ParCouponCurve_SOFR",
         max_concurrent_tasks: Optional[int] = 64,
         max_keepalive_connections: Optional[int] = 5,
-        verbose=False,
+        verbose: bool = False,
     ) -> Dict[datetime, pd.DataFrame]:
-
-        bdates = pd.date_range(start=start_date, end=end_date, freq=CustomBusinessDay(calendar=USFederalHolidayCalendar()))
-
-        async def build_tasks(
-            client: httpx.AsyncClient,
-            dates: List[datetime],
-        ):
-            tasks = []
-            semaphore = asyncio.Semaphore(max_concurrent_tasks)
-            for date in dates:
-                task = asyncio.create_task(
-                    self._fetch_and_read_eris_ftp_file(semaphore=semaphore, client=client, date=date, workbook_type=workbook_type)
-                )
-                tasks.append(task)
-
-            return await tqdm.asyncio.tqdm.gather(*tasks, desc="FETCHING ERIS FTP Files...")
-
-        async def run_fetch_all(
-            dates: List[datetime],
-        ):
-            limits = httpx.Limits(
-                max_connections=max_concurrent_tasks,
-                max_keepalive_connections=max_keepalive_connections,
-            )
-            async with httpx.AsyncClient(limits=limits, proxies=self._httpx_proxies, verify=False) as client:
-                all_data = await build_tasks(
-                    client=client,
-                    dates=dates,
-                )
-                return all_data
+        """Fetch Eris futures data for a date range.
+        
+        Args:
+            start_date: Start date to fetch data for
+            end_date: End date to fetch data for
+            workbook_type: Type of workbook to fetch
+            max_concurrent_tasks: Maximum number of concurrent tasks
+            max_keepalive_connections: Maximum number of keepalive connections
+            verbose: Whether to print verbose output
+            
+        Returns:
+            Dict mapping dates to DataFrames containing the futures data
+        """
+        bdates = pd.date_range(
+            start=start_date,
+            end=end_date,
+            freq=CustomBusinessDay(calendar=USFederalHolidayCalendar())
+        )
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DtypeWarning)
             results: List[Tuple[str, pd.DataFrame]] = asyncio.run(
-                run_fetch_all(
+                self.run_fetch_all(
                     dates=bdates,
+                    max_concurrent_tasks=max_concurrent_tasks,
+                    max_keepalive_connections=max_keepalive_connections,
+                    workbook_type=workbook_type,
                 )
             )
+            
             if results is None or len(results) == 0:
-                print('"fetch_eris_ftp_timeseries" --- empty results') if verbose else None
+                if verbose:
+                    print('"fetch_eris_ftp_timeseries" --- empty results')
                 return {}
 
             return dict(results)
