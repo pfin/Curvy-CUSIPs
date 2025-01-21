@@ -520,22 +520,25 @@ class S490Swaptions:
             # Process results
             close_premium_dict = {}
             ql_curves_dict = {}
-            
-            for date in swaption_time_and_sales_dict.keys():
-                try:
-                    ql_curve = self.s490_swaps.get_ql_term_structure(date)
-                    ql_curves_dict[date] = ql_curve
-                    
-                    close_premium = self._calculate_closing_premium(
-                        swaption_time_and_sales_dict[date],
-                        ql_curve,
-                        model
-                    )
-                    close_premium_dict[date] = close_premium
-                    
-                except Exception as e:
-                    self._logger.error(f"Error processing date {date}: {str(e)}")
-                    continue
+
+            # Calculate implied vols for each date
+            for date, df in swaption_time_and_sales_dict.items():
+                # Get QuantLib curve for this date
+                ql_curves = self.s490_swaps.build_sofr_ois_curve(
+                    as_of_date=date,
+                    data_fetcher=data_fetcher
+                )
+                ql_curves_dict[date] = ql_curves
+
+                # Calculate IVs using the curve
+                df['IV'] = df.apply(lambda row: self._calculate_implied_vol(
+                    premium=row['Option Premium per Notional'],
+                    strike=row['Strike Price'],
+                    option_tenor=row['Option Tenor'],
+                    underlying_tenor=row['Underlying Tenor'],
+                    curve=ql_curves['discount_curve'],
+                    model=model
+                ), axis=1)
 
             return swaption_time_and_sales_dict, close_premium_dict, ql_curves_dict
             
@@ -566,3 +569,48 @@ class S490Swaptions:
                 premiums[key] = float(last_trade['Option Premium per Notional'])
                 
         return premiums
+
+    def _calculate_implied_vol(
+        self,
+        premium: float,
+        strike: float,
+        option_tenor: str,
+        underlying_tenor: str,
+        curve: ql.YieldTermStructure,
+        model: str
+    ) -> float:
+        """Calculate implied volatility using Bachelier formula for normal model."""
+        try:
+            # Convert tenors to QuantLib periods
+            opt_period = ql.Period(option_tenor)
+            und_period = ql.Period(underlying_tenor)
+            
+            # Get forward rate
+            forward = curve.forwardRate(
+                opt_period,
+                und_period,
+                ql.Actual365Fixed(),
+                ql.Simple
+            ).rate()
+            
+            # Get time to expiry in years
+            expiry = float(opt_period.length()) / 12.0  # Convert months to years
+            
+            if model == "normal":
+                # Use QuantLib's Bachelier calculator
+                vol = ql.bachelierBlackFormulaImpliedVol(
+                    ql.Option.Call,  # Type doesn't matter for ATM
+                    strike,
+                    forward,
+                    expiry,
+                    premium
+                )
+                return vol
+            elif model == "lognormal":
+                raise NotImplementedError("Lognormal model not yet implemented")
+            else:
+                raise ValueError(f"Unknown model: {model}")
+            
+        except Exception as e:
+            self._logger.warning(f"Failed to calculate IV: {str(e)}")
+            return float('nan')
