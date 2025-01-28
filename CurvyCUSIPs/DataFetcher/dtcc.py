@@ -1119,3 +1119,85 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
                 swaption_time_and_sales_df_dict[date] = swaption_time_and_sales_df
 
         return swaption_time_and_sales_df_dict
+
+    def fetch_intraday_sdr_data(
+        self,
+        date: datetime,
+        agency: Literal["CFTC", "SEC"],
+        asset_class: Literal["COMMODITIES", "CREDITS", "EQUITIES", "FOREX", "RATES"],
+        poll_interval: int = 15,
+        background: bool = True
+    ) -> Dict[datetime, pd.DataFrame]:
+        """
+        Fetch intraday DTCC SDR data with background polling.
+        
+        Args:
+            date: Current date only
+            agency: CFTC or SEC
+            asset_class: Asset class to fetch
+            poll_interval: Seconds between polls (default 15)
+            background: Whether to run continuous polling in background
+        
+        Returns:
+            Dict mapping timestamps to DataFrames of trades
+        """
+        
+        if date.date() != datetime.now().date():
+            raise ValueError("Intraday data only available for current date")
+
+        # Track processed slices and data
+        processed_slices = set()
+        trade_data = {}
+        
+        async def fetch_slice(slice_num: int) -> Optional[BytesIO]:
+            """Fetch a single slice of intraday data"""
+            url = f"https://pddata.dtcc.com/ppd/api/report/intraday/{agency}/{agency}_SLICE_{asset_class}_{date.strftime('%Y_%m_%d')}_{slice_num}.zip"
+            
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(url, timeout=self._global_timeout)
+                    if response.status_code == 404:
+                        return None
+                    response.raise_for_status()
+                    return BytesIO(response.content)
+            except Exception as e:
+                self._logger.error(f"Error fetching slice {slice_num}: {e}")
+                return None
+
+        async def poll_new_data():
+            """Poll for new slices"""
+            slice_num = 1
+            while True:
+                if slice_num not in processed_slices:
+                    zip_buffer = await fetch_slice(slice_num)
+                    if zip_buffer:
+                        # Process new slice
+                        df = self._extract_excel_from_zip(zip_buffer)
+                        if not df.empty:
+                            # Check for duplicates
+                            if trade_data:
+                                existing_data = pd.concat(trade_data.values())
+                                dupes = df[df.duplicated(subset=['Event timestamp', 'Execution Timestamp', 'Notional Amount', 'Strike Price'], keep=False)]
+                                if not dupes.empty:
+                                    self._logger.warning(f"Found {len(dupes)} duplicate trades in slice {slice_num}")
+                                
+                            trade_data[datetime.now()] = df
+                            processed_slices.add(slice_num)
+                            slice_num += 1
+                        else:
+                            # No more slices available
+                            await asyncio.sleep(poll_interval)
+                    else:
+                        # No more slices, wait before checking again
+                        await asyncio.sleep(poll_interval)
+                else:
+                    slice_num += 1
+
+        if background:
+            # Start background polling
+            asyncio.create_task(poll_new_data())
+        else:
+            # Single fetch of all available slices
+            asyncio.run(poll_new_data())
+
+        return trade_data

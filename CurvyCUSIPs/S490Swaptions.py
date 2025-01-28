@@ -497,7 +497,7 @@ class S490Swaptions:
     ) -> Tuple[Dict[datetime, pd.DataFrame], Dict[datetime, Dict[str, float]], Dict[datetime, ql.YieldTermStructure]]:
         """Fetch and process swaption time and sales data."""
         try:
-            # Fetch swaption trades from DTCC
+            # Use DTCC fetcher directly
             swaption_time_and_sales_dict = data_fetcher.dtcc_sdr_fetcher.fetch_historical_swaption_time_and_sales(
                 start_date=start_date,
                 end_date=end_date,
@@ -517,31 +517,14 @@ class S490Swaptions:
                 swaption_exercise_styles=["European"]
             )
 
-            # Process results
-            close_premium_dict = {}
-            ql_curves_dict = {}
+            # Get curves for each date
+            ql_curves_dict = {
+                date: self.s490_swaps.get_ql_term_structure(date)
+                for date in swaption_time_and_sales_dict.keys()
+            }
 
-            # Calculate implied vols for each date
-            for date, df in swaption_time_and_sales_dict.items():
-                # Get QuantLib curve for this date
-                ql_curves = self.s490_swaps.build_sofr_ois_curve(
-                    as_of_date=date,
-                    data_fetcher=data_fetcher
-                )
-                ql_curves_dict[date] = ql_curves
+            return swaption_time_and_sales_dict, {}, ql_curves_dict
 
-                # Calculate IVs using the curve
-                df['IV'] = df.apply(lambda row: self._calculate_implied_vol(
-                    premium=row['Option Premium per Notional'],
-                    strike=row['Strike Price'],
-                    option_tenor=row['Option Tenor'],
-                    underlying_tenor=row['Underlying Tenor'],
-                    curve=ql_curves['discount_curve'],
-                    model=model
-                ), axis=1)
-
-            return swaption_time_and_sales_dict, close_premium_dict, ql_curves_dict
-            
         except Exception as e:
             self._logger.error(f"Failed to fetch swaption data: {str(e)}")
             raise
