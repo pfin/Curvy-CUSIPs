@@ -8,6 +8,7 @@ from datetime import datetime
 from functools import reduce
 from io import BytesIO
 from typing import Callable, Dict, List, Literal, Optional, Tuple, Union
+from pathlib import Path
 
 import numpy as np
 import httpx
@@ -1201,3 +1202,58 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
             asyncio.run(poll_new_data())
 
         return trade_data
+
+    def summarize_trades_for_date(self, date: datetime, agency: str, product_type: str = "RATES") -> pd.DataFrame:
+        """
+        Read and summarize trades from saved files for a specific date.
+        
+        Args:
+            date: The date for which to summarize trades.
+            agency: The agency (e.g., "CFTC" or "SEC").
+            product_type: The product type (e.g., "RATES", "EQUITIES").
+        
+        Returns:
+            A DataFrame summarizing the trades.
+        """
+        date_dir = Path(__file__).parent.parent.parent / 'db' / date.strftime('%Y%m%d')
+        if not date_dir.exists():
+            raise FileNotFoundError(f"No data directory found for date {date.strftime('%Y%m%d')}")
+
+        all_trades = []
+        for file in date_dir.glob(f"{agency.lower()}_{product_type.lower()}_slice_*.csv"):
+            df = pd.read_csv(file)
+            all_trades.append(df)
+
+        if not all_trades:
+            raise ValueError(f"No trade files found for {agency} on {date.strftime('%Y%m%d')}")
+
+        # Concatenate all DataFrames
+        trades_df = pd.concat(all_trades, ignore_index=True)
+
+        # Perform analysis (e.g., summarizing trades)
+        summary = trades_df.describe(include='all')
+
+        return summary
+
+    async def publish_live_trades(self, agency: str, product_type: str = "RATES"):
+        """
+        Publish live trades as they happen and put them in context of historical trades.
+        
+        Args:
+            agency: The agency (e.g., "CFTC" or "SEC").
+            product_type: The product type (e.g., "RATES", "EQUITIES").
+        """
+        today = datetime.now()
+        historical_summary = self.summarize_trades_for_date(today, agency, product_type)
+
+        # Fetch live trades
+        live_trades = await self.fetch_intraday_sdr_data(today, agency, product_type)
+
+        for timestamp, df in live_trades.items():
+            # Publish live trades (this could be to a message queue, log, etc.)
+            print(f"Publishing live trades at {timestamp}:")
+            print(df.head())
+
+            # Contextualize with historical data
+            print("\nHistorical Summary:")
+            print(historical_summary)

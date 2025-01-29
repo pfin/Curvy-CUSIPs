@@ -58,7 +58,14 @@ async def test_intraday_fetching():
         print(f"Error: {str(e)}")
 
 def main():
-    asyncio.run(test_intraday_fetching())
+    try:
+        asyncio.run(test_intraday_fetching())
+    except RuntimeError as e:
+        if "asyncio.run() cannot be called from a running event loop" in str(e):
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(test_intraday_fetching())
+        else:
+            raise
 
 if __name__ == "__main__":
     main() 
