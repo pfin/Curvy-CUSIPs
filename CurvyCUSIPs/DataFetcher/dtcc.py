@@ -1152,7 +1152,7 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
         
         async def fetch_slice(slice_num: int) -> Optional[BytesIO]:
             """Fetch a single slice of intraday data"""
-            url = f"https://pddata.dtcc.com/ppd/api/report/intraday/{agency}/{agency}_SLICE_{asset_class}_{date.strftime('%Y_%m_%d')}_{slice_num}.zip"
+            url = f"https://pddata.dtcc.com/ppd/api/report/intraday/{agency.lower()}/{agency.upper()}_SLICE_{asset_class}_{date.strftime('%Y_%m_%d')}_{slice_num}.zip"
             
             try:
                 async with httpx.AsyncClient() as client:
